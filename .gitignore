@@ -1,0 +1,10 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+generated/
+.vscode/
+verified_emails.db
+.env
+.env.*
+!.env.example

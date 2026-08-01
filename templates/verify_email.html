@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Verify Email</title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
+</head>
+
+<body>
+    <main class="container">
+        <section class="form-card verification-card">
+            <div class="logo">✉</div>
+
+            <h1>Verify Your Email</h1>
+
+            <p>
+                We sent a 6-digit verification code to:
+            </p>
+
+            <p>
+                <strong>{{ email }}</strong>
+            </p>
+
+            <p>
+                Enter the code below to start the Kubernetes
+                deployment. The code expires in 10 minutes.
+            </p>
+
+            {% if error %}
+                <div class="error-box">
+                    <p>{{ error }}</p>
+                </div>
+            {% endif %}
+
+            <form method="POST">
+                <label for="verification_code">
+                    Verification code
+                </label>
+
+                <input
+                    type="text"
+                    id="verification_code"
+                    name="verification_code"
+                    maxlength="6"
+                    minlength="6"
+                    inputmode="numeric"
+                    pattern="[0-9]{6}"
+                    placeholder="Enter the 6-digit code"
+                    autocomplete="one-time-code"
+                    required
+                >
+
+                <button type="submit">
+                    Verify and Start Deployment
+                </button>
+            </form>
+
+            <a class="back-link" href="{{ url_for('home') }}">
+                Return to deployment form
+            </a>
+        </section>
+    </main>
+</body>
+</html>

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Deployment Result</title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
+</head>
+
+<body>
+    <main class="page-container">
+        <section class="deployment-card">
+
+            {% if result.success %}
+                <header class="card-header">
+                    <div class="logo">✓</div>
+
+                    <div>
+                        <h1>Deployment Successful</h1>
+
+                        <p>
+                            {{ result.message }}
+                        </p>
+                    </div>
+                </header>
+
+                <section class="form-section result-box">
+                    <h2>Deployment Result</h2>
+
+                    <p>
+                        <strong>User:</strong>
+                        {{ user.user_name }}
+                    </p>
+
+                    <p>
+                        <strong>Email:</strong>
+                        {{ user.email }}
+                    </p>
+
+                    <p>
+                        <strong>Cluster:</strong>
+                        {{ result.cluster_name }}
+                    </p>
+
+                    <p>
+                        <strong>Cluster nodes:</strong>
+                        {{ result.node_count }}
+                    </p>
+
+                    <p>
+                        <strong>Cluster action:</strong>
+                        {{ result.cluster_result }}
+                    </p>
+
+                    <p>
+                        <strong>Application:</strong>
+                        {{ result.app_name }}
+                    </p>
+
+                    <p>
+                        <strong>Docker image:</strong>
+                        {{ data.image }}
+                    </p>
+
+                    <p>
+                        <strong>Replicas:</strong>
+                        {{ result.replicas }}
+                    </p>
+
+                    <p>
+                        <strong>Service:</strong>
+                        {{ result.service_name }}
+                    </p>
+
+                    <p>
+                        <strong>Deployment time:</strong>
+                        {{ result.duration }} seconds
+                    </p>
+                </section>
+{% if result.email_sent %}
+    <p class="email-success">
+        <strong>Email:</strong>
+        {{ result.email_message }}
+    </p>
+{% else %}
+    <p class="email-error">
+        <strong>Email:</strong>
+        {{ result.email_message }}
+    </p>
+{% endif %}
+            {% else %}
+                <header class="card-header error-header">
+                    <div class="logo error-logo">!</div>
+
+                    <div>
+                        <h1>Deployment Failed</h1>
+
+                        <p>
+                            The application could not be deployed.
+                        </p>
+                    </div>
+                </header>
+
+                <section class="form-section error-box">
+                    <h2>Error</h2>
+                    <p>{{ result.message }}</p>
+                </section>
+            {% endif %}
+
+            <a href="/" class="deploy-button back-button">
+                Back to Form
+            </a>
+        </section>
+    </main>
+</body>
+</html>
