@@ -6,5 +6,5 @@ generated/
 .vscode/
 verified_emails.db
 .env
-.env.*
-!.env.example
+*.log
+.pytest_cache/

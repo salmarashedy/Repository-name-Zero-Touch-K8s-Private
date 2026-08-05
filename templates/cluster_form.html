@@ -1,0 +1,69 @@
+```jinja
+{% extends "base.html" %}
+
+{% block heading %}
+  Create or resize a cluster
+{% endblock %}
+
+{% block intro %}
+  Enter the cluster name and the exact node count you want.
+{% endblock %}
+
+{% block content %}
+  <form method="post">
+    <section class="form-section">
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="cluster_name">Cluster name</label>
+
+          <input
+            id="cluster_name"
+            name="cluster_name"
+            value="{{ values.get('cluster_name', '') }}"
+            required
+          >
+
+          <small>
+            Spaces and capital letters are converted automatically.
+          </small>
+
+          {% if errors.get('cluster_name') %}
+            <small class="field-error">
+              {{ errors.cluster_name }}
+            </small>
+          {% endif %}
+        </div>
+
+        <div class="form-group">
+          <label for="node_count">Number of nodes</label>
+
+          <input
+            type="number"
+            id="node_count"
+            name="node_count"
+            min="1"
+            max="5"
+            step="1"
+            value="{{ values.get('node_count', '') }}"
+            required
+          >
+
+          {% if errors.get('node_count') %}
+            <small class="field-error">
+              {{ errors.node_count }}
+            </small>
+          {% endif %}
+        </div>
+      </div>
+    </section>
+
+    <button class="deploy-button" type="submit">
+      Review cluster operation
+    </button>
+  </form>
+
+  <a class="back-link" href="{{ url_for('dashboard') }}">
+    Back to actions
+  </a>
+{% endblock %}
+```

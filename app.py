@@ -5,35 +5,48 @@ import re
 import smtplib
 import sqlite3
 import time
+import uuid
 from email.message import EmailMessage
 from pathlib import Path
 
-from flask import (
-    Flask,
-    redirect,
-    render_template,
-    request,
-    session,
-    url_for,
-)
+from flask import Flask, redirect, render_template, request, session, url_for
 
-from deployment_manager import deploy_application_from_web
+from deployment_manager import (
+    execute_web_action,
+    list_application_choices,
+    list_cluster_choices,
+)
+from cluster_manager import cluster_exists
 
 
 app = Flask(__name__)
 
-app.secret_key = os.environ.get(
-    "FLASK_SECRET_KEY",
-    "zero-touch-local-development-key",
-)
+secret = os.environ.get("FLASK_SECRET_KEY")
+
+if not secret:
+    secret = random.SystemRandom().randbytes(32).hex()
+
+app.secret_key = secret
+
 
 DATABASE_PATH = (
     Path(__file__).resolve().parent
     / "verified_emails.db"
 )
 
-VERIFICATION_EXPIRY_SECONDS = 600
+VERIFICATION_EXPIRY_SECONDS = 120
 MAX_VERIFICATION_ATTEMPTS = 5
+MAX_CPU_MILLICORES = 1000
+MAX_MEMORY_MIB = 1024
+MAX_NODE_COUNT = 5
+
+ACTIONS = {
+    "create",
+    "deploy",
+    "update",
+    "delete",
+    "inspect",
+}
 
 
 def initialize_database() -> None:
@@ -47,33 +60,156 @@ def initialize_database() -> None:
             """
         )
 
-        connection.commit()
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS owned_clusters (
+                email TEXT NOT NULL,
+                cluster_name TEXT NOT NULL UNIQUE,
+                PRIMARY KEY (email, cluster_name)
+            )
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS owned_applications (
+                email TEXT NOT NULL,
+                cluster_name TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                app_name TEXT NOT NULL,
+                PRIMARY KEY (
+                    email,
+                    cluster_name,
+                    namespace,
+                    app_name
+                ),
+                UNIQUE (
+                    cluster_name,
+                    namespace,
+                    app_name
+                )
+            )
+            """
+        )
 
 
-def normalize_email(email: str) -> str:
-    return email.strip().lower()
+initialize_database()
 
 
-def valid_kubernetes_name(value: str) -> bool:
-    pattern = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
-
-    return (
-        len(value) <= 63
-        and re.fullmatch(pattern, value) is not None
-    )
+def normalize_email(value: str) -> str:
+    return value.strip().lower()
 
 
 def valid_email(value: str) -> bool:
-    pattern = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+    return (
+        re.fullmatch(
+            r"[^@\s]+@[^@\s]+\.[^@\s]+",
+            value,
+        )
+        is not None
+    )
 
-    return re.fullmatch(pattern, value) is not None
+
+def normalize_kubernetes_name(value: str) -> str:
+    value = re.sub(
+        r"[^a-z0-9]+",
+        "-",
+        value.strip().lower(),
+    ).strip("-")
+
+    return value[:63].rstrip("-")
+
+
+def valid_kubernetes_name(value: str) -> bool:
+    return bool(value) and (
+        re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?",
+            value,
+        )
+        is not None
+    )
+
+
+def parse_integer(
+    value: str,
+    label: str,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = value.strip()
+
+    if not re.fullmatch(r"\d+", value):
+        raise ValueError(
+            f"{label} must be a whole number."
+        )
+
+    number = int(value)
+
+    if not minimum <= number <= maximum:
+        raise ValueError(
+            f"{label} must be between "
+            f"{minimum} and {maximum}."
+        )
+
+    return number
+
+
+def parse_cpu_millicores(value: str) -> int:
+    value = value.strip()
+
+    if not re.fullmatch(r"[1-9]\d*", value):
+        raise ValueError(
+            "CPU must be a positive whole number "
+            "in millicores."
+        )
+
+    number = int(value)
+
+    if number > MAX_CPU_MILLICORES:
+        raise ValueError(
+            "Each user can request a maximum of "
+            "1000 millicores (1000m or 1 CPU core)."
+        )
+
+    return number
+
+
+def parse_memory_mib(value: str) -> int:
+    value = value.strip()
+
+    if not re.fullmatch(r"[1-9]\d*", value):
+        raise ValueError(
+            "Memory must be a positive whole "
+            "number in MiB."
+        )
+
+    number = int(value)
+
+    if number > MAX_MEMORY_MIB:
+        raise ValueError(
+            "Each user can request a maximum of "
+            "1024 MiB (1 GiB)."
+        )
+
+    return number
+
+
+def normalize_docker_image(value: str) -> str:
+    """Accept an image reference or Docker pull command."""
+
+    value = value.strip()
+
+    if value.lower().startswith("docker pull "):
+        value = value[len("docker pull "):].strip()
+
+    return value
 
 
 def email_is_verified(email: str) -> bool:
     with sqlite3.connect(DATABASE_PATH) as connection:
         result = connection.execute(
             """
-            SELECT email
+            SELECT 1
             FROM verified_emails
             WHERE email = ?
             """,
@@ -87,452 +223,1158 @@ def save_verified_email(email: str) -> None:
     with sqlite3.connect(DATABASE_PATH) as connection:
         connection.execute(
             """
-            INSERT OR IGNORE INTO verified_emails (email)
+            INSERT OR IGNORE INTO verified_emails (
+                email
+            )
             VALUES (?)
             """,
             (normalize_email(email),),
         )
 
-        connection.commit()
+
+def owned_cluster_names(email: str) -> set[str]:
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        rows = connection.execute(
+            """
+            SELECT cluster_name
+            FROM owned_clusters
+            WHERE email = ?
+            """,
+            (normalize_email(email),),
+        ).fetchall()
+
+    return {
+        row[0]
+        for row in rows
+    }
 
 
-def hash_verification_code(code: str) -> str:
-    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+def cluster_owner(
+    cluster_name: str,
+) -> str | None:
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        row = connection.execute(
+            """
+            SELECT email
+            FROM owned_clusters
+            WHERE cluster_name = ?
+            """,
+            (cluster_name,),
+        ).fetchone()
+
+    return row[0] if row else None
 
 
-def create_verification_code() -> str:
-    return f"{random.SystemRandom().randint(0, 999999):06d}"
-
-
-def get_gmail_settings() -> tuple[str, str]:
-    sender_email = os.environ.get("SENDER_EMAIL")
-    app_password = os.environ.get("GMAIL_APP_PASSWORD")
-
-    if not sender_email:
-        raise RuntimeError(
-            "SENDER_EMAIL is not set in PowerShell."
+def save_owned_cluster(
+    email: str,
+    cluster_name: str,
+) -> None:
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO owned_clusters (
+                email,
+                cluster_name
+            )
+            VALUES (?, ?)
+            """,
+            (
+                normalize_email(email),
+                cluster_name,
+            ),
         )
 
-    if not app_password:
-        raise RuntimeError(
-            "GMAIL_APP_PASSWORD is not set in PowerShell."
+
+def owned_application_keys(
+    email: str,
+) -> set[str]:
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                cluster_name,
+                namespace,
+                app_name
+            FROM owned_applications
+            WHERE email = ?
+            """,
+            (normalize_email(email),),
+        ).fetchall()
+
+    return {
+        f"{cluster}|{namespace}|{application}"
+        for cluster, namespace, application in rows
+    }
+
+
+def save_owned_application(
+    email: str,
+    application: dict,
+    cluster: dict,
+) -> None:
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO owned_applications (
+                email,
+                cluster_name,
+                namespace,
+                app_name
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                normalize_email(email),
+                cluster["cluster_name"],
+                application.get(
+                    "namespace",
+                    "default",
+                ),
+                application["app_name"],
+            ),
         )
 
-    return sender_email, app_password
+
+def remove_owned_application(
+    email: str,
+    application: dict,
+    cluster: dict,
+) -> None:
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.execute(
+            """
+            DELETE FROM owned_applications
+            WHERE email = ?
+              AND cluster_name = ?
+              AND namespace = ?
+              AND app_name = ?
+            """,
+            (
+                normalize_email(email),
+                cluster["cluster_name"],
+                application.get(
+                    "namespace",
+                    "default",
+                ),
+                application["app_name"],
+            ),
+        )
 
 
-def send_email(message: EmailMessage) -> None:
-    sender_email, app_password = get_gmail_settings()
-
-    message["From"] = sender_email
-
-    with smtplib.SMTP_SSL(
-        host="smtp.gmail.com",
-        port=465,
-        timeout=30,
-    ) as smtp:
-        smtp.login(sender_email, app_password)
-        smtp.send_message(message)
+def hash_code(code: str) -> str:
+    return hashlib.sha256(
+        code.encode()
+    ).hexdigest()
 
 
 def send_verification_email(
-    recipient_email: str,
-    user_name: str,
-    verification_code: str,
+    email: str,
+    name: str,
+    code: str,
 ) -> None:
-    message = EmailMessage()
+    sender = os.environ.get("SENDER_EMAIL")
+    password = os.environ.get(
+        "GMAIL_APP_PASSWORD"
+    )
 
+    if not sender or not password:
+        raise RuntimeError(
+            "Email settings are not configured."
+        )
+
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = email
     message["Subject"] = (
         "Verify your email - Zero Touch Kubernetes"
     )
 
-    message["To"] = recipient_email
-
     message.set_content(
-        f"""
-Hello {user_name},
-
-Your email verification code is:
-
-{verification_code}
-
-This code expires in 10 minutes.
-
-If you did not request a Kubernetes deployment,
-you can ignore this email.
-
-Zero Touch Kubernetes Deployment System
-        """.strip()
+        f"Hello {name},\n\n"
+        f"Your verification code is {code}.\n"
+        "It expires in 2 minutes.\n"
     )
 
-    send_email(message)
+    with smtplib.SMTP_SSL(
+        "smtp.gmail.com",
+        465,
+        timeout=30,
+    ) as smtp:
+        smtp.login(sender, password)
+        smtp.send_message(message)
 
 
-def send_deployment_email(
-    recipient_email: str,
-    user_name: str,
+def send_operation_email(
+    user: dict,
+    action: str,
+    cluster: dict,
+    application: dict | None,
     result: dict,
-    data: dict,
 ) -> None:
-    message = EmailMessage()
-
-    message["Subject"] = (
-        f'Deployment successful: {result["app_name"]}'
+    sender = os.environ.get("SENDER_EMAIL")
+    password = os.environ.get(
+        "GMAIL_APP_PASSWORD"
     )
 
-    message["To"] = recipient_email
+    if not sender or not password:
+        raise RuntimeError(
+            "Operation email settings are "
+            "not configured."
+        )
+
+    status = (
+        "Successful"
+        if result.get("success", False)
+        else "Failed"
+    )
+
+    details = [
+        f"Hello {user['user_name']},",
+        "",
+        f"Operation: {action.title()}",
+        f"Status: {status}",
+        f"Cluster: {cluster['cluster_name']}",
+    ]
+
+    if (
+        application
+        and application.get("app_name")
+    ):
+        details.append(
+            f"Application: "
+            f"{application['app_name']}"
+        )
+
+    if result.get("cluster_duration") is not None:
+        details.append(
+            "Cluster deployment time: "
+            f"{result['cluster_duration']:.2f} "
+            "seconds"
+        )
+
+    if (
+        result.get("application_duration")
+        is not None
+    ):
+        details.append(
+            "Application deployment time: "
+            f"{result['application_duration']:.2f} "
+            "seconds"
+        )
+
+    details.extend(
+        [
+            "",
+            "Result:",
+            result.get(
+                "message",
+                "No result message was provided.",
+            ),
+        ]
+    )
+
+    checks = result.get("checks", [])
+
+    if checks:
+        details.extend(
+            [
+                "",
+                "Verification checks:",
+            ]
+        )
+
+        details.extend(
+            f"- {check}"
+            for check in checks
+        )
+
+    details.extend(
+        [
+            "",
+            "Zero-Touch Kubernetes "
+            "Deployment System",
+        ]
+    )
+
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = user["email"]
+    message["Subject"] = (
+        "Zero-Touch Kubernetes - "
+        f"{action.title()} - {status}"
+    )
 
     message.set_content(
-        f"""
-Hello {user_name},
-
-Your Kubernetes application was deployed successfully.
-
-Deployment information
-----------------------
-Cluster name: {result["cluster_name"]}
-Number of nodes: {result["node_count"]}
-Application name: {result["app_name"]}
-Docker image: {data["image"]}
-Replicas: {result["replicas"]}
-Container port: {data["port"]}
-Service name: {result["service_name"]}
-Deployment time: {result["duration"]} seconds
-
-CPU request: {data["cpu_request"]}
-CPU limit: {data["cpu_limit"]}
-Memory request: {data["memory_request"]}
-Memory limit: {data["memory_limit"]}
-
-The deployment is running successfully inside Kubernetes.
-
-Zero Touch Kubernetes Deployment System
-        """.strip()
+        "\n".join(details)
     )
 
-    send_email(message)
+    with smtplib.SMTP_SSL(
+        "smtp.gmail.com",
+        465,
+        timeout=30,
+    ) as smtp:
+        smtp.login(sender, password)
+        smtp.send_message(message)
 
 
-def collect_form_information() -> tuple:
-    cluster_name = (
-        request.form["cluster_name"]
-        .strip()
-        .lower()
-    )
-
-    app_name = (
-        request.form["app_name"]
-        .strip()
-        .lower()
-    )
-
-    node_count = int(request.form["node_count"])
-    replicas = int(request.form["replicas"])
-    port = int(request.form["port"])
-
-    if not valid_kubernetes_name(cluster_name):
-        raise ValueError(
-            "The cluster name is not valid."
-        )
-
-    if not valid_kubernetes_name(app_name):
-        raise ValueError(
-            "The application name is not valid."
-        )
-
-    if node_count < 1:
-        raise ValueError(
-            "The number of nodes must be greater than zero."
-        )
-
-    if replicas < 1:
-        raise ValueError(
-            "The number of replicas must be greater than zero."
-        )
-
-    if not 1 <= port <= 65535:
-        raise ValueError(
-            "The container port must be between 1 and 65535."
-        )
-
-    user_information = {
-        "user_name": (
-            request.form["user_name"].strip()
-        ),
-        "email": normalize_email(
-            request.form["email"]
-        ),
-    }
-
-    application_values = {
-        "app_name": app_name,
-        "image": request.form["image"].strip(),
-        "replicas": replicas,
-        "port": port,
-        "cpu_request": (
-            request.form["cpu_request"].strip()
-        ),
-        "cpu_limit": (
-            request.form["cpu_limit"].strip()
-        ),
-        "memory_request": (
-            request.form["memory_request"].strip()
-        ),
-        "memory_limit": (
-            request.form["memory_limit"].strip()
-        ),
-    }
-
-    if not user_information["user_name"]:
-        raise ValueError(
-            "The user name cannot be empty."
-        )
-
-    if not valid_email(user_information["email"]):
-        raise ValueError(
-            "Please enter a valid email address."
-        )
-
-    if not application_values["image"]:
-        raise ValueError(
-            "The Docker image cannot be empty."
-        )
-
-    return (
-        cluster_name,
-        node_count,
-        user_information,
-        application_values,
-    )
-
-
-def perform_deployment(
-    cluster_name: str,
-    node_count: int,
-    user_information: dict,
-    application_values: dict,
+def field_error(
+    template: str,
+    errors: dict,
+    values: dict,
+    **context,
 ):
-    result = deploy_application_from_web(
-        cluster_name=cluster_name,
-        node_count=node_count,
-        values=application_values,
-    )
-
-    if result["success"]:
-        try:
-            send_deployment_email(
-                recipient_email=(
-                    user_information["email"]
-                ),
-                user_name=(
-                    user_information["user_name"]
-                ),
-                result=result,
-                data=application_values,
-            )
-
-            result["email_sent"] = True
-            result["email_message"] = (
-                "A deployment notification was sent to "
-                f'{user_information["email"]}.'
-            )
-
-        except (
-            OSError,
-            RuntimeError,
-            smtplib.SMTPException,
-        ) as email_error:
-            result["email_sent"] = False
-            result["email_message"] = (
-                "The application was deployed, but the "
-                f"notification failed: {email_error}"
-            )
-
-            print("\nDeployment email failed.")
-            print(f"Error: {email_error}")
-
     return render_template(
-        "result.html",
-        result=result,
-        user=user_information,
-        data=application_values,
+        template,
+        errors=errors,
+        values=values,
+        **context,
     )
 
 
-@app.route("/")
-def home():
-    return render_template("index.html")
+@app.route("/", methods=["GET", "POST"])
+def identity():
+    values = {
+        "user_name": "",
+        "email": "",
+    }
 
+    errors = {}
 
-@app.route("/deploy", methods=["POST"])
-def deploy():
-    try:
-        (
-            cluster_name,
-            node_count,
-            user_information,
-            application_values,
-        ) = collect_form_information()
-
-        email = user_information["email"]
-
-        if email_is_verified(email):
-            print(
-                f"\nEmail already verified: {email}"
-            )
-
-            return perform_deployment(
-                cluster_name=cluster_name,
-                node_count=node_count,
-                user_information=user_information,
-                application_values=application_values,
-            )
-
-        verification_code = create_verification_code()
-
-        session["pending_deployment"] = {
-            "cluster_name": cluster_name,
-            "node_count": node_count,
-            "user_information": user_information,
-            "application_values": application_values,
-        }
-
-        session["verification"] = {
-            "email": email,
-            "code_hash": hash_verification_code(
-                verification_code
-            ),
-            "expires_at": (
-                time.time()
-                + VERIFICATION_EXPIRY_SECONDS
-            ),
-            "attempts": 0,
-        }
-
-        send_verification_email(
-            recipient_email=email,
-            user_name=user_information["user_name"],
-            verification_code=verification_code,
+    if request.method == "GET":
+        return field_error(
+            "identity.html",
+            errors,
+            values,
         )
 
-        return redirect(url_for("verify_email"))
+    values = {
+        key: request.form.get(
+            key,
+            "",
+        ).strip()
+        for key in values
+    }
+
+    email = normalize_email(
+        values["email"]
+    )
+
+    if not values["user_name"]:
+        errors["user_name"] = (
+            "Name is required."
+        )
+
+    if not valid_email(email):
+        errors["email"] = (
+            "Enter a valid email address."
+        )
+
+    if errors:
+        return field_error(
+            "identity.html",
+            errors,
+            values,
+        )
+
+    session.clear()
+
+    session["user"] = {
+        "user_name": values["user_name"],
+        "email": email,
+    }
+
+    if email_is_verified(email):
+        session["verified"] = True
+        return redirect(
+            url_for("dashboard")
+        )
+
+    code = (
+        f"{random.SystemRandom().randint(0, 999999):06d}"
+    )
+
+    try:
+        send_verification_email(
+            email,
+            values["user_name"],
+            code,
+        )
 
     except (
-        KeyError,
-        TypeError,
-        ValueError,
         OSError,
         RuntimeError,
         smtplib.SMTPException,
     ) as error:
-        result = {
-            "success": False,
-            "message": str(error),
-            "email_sent": False,
+        errors["email"] = str(error)
+
+        return field_error(
+            "identity.html",
+            errors,
+            values,
+        )
+
+    session["verification"] = {
+        "code_hash": hash_code(code),
+        "expires_at": (
+            time.time()
+            + VERIFICATION_EXPIRY_SECONDS
+        ),
+        "attempts": 0,
+    }
+
+    return redirect(
+        url_for("verify_email")
+    )
+
+
+@app.route(
+    "/verify",
+    methods=["GET", "POST"],
+)
+def verify_email():
+    verification = session.get(
+        "verification"
+    )
+
+    user = session.get("user")
+
+    if not verification or not user:
+        return redirect(
+            url_for("identity")
+        )
+
+    error = None
+
+    if request.method == "POST":
+        if (
+            time.time()
+            > verification["expires_at"]
+        ):
+            session.pop(
+                "verification",
+                None,
+            )
+
+            error = (
+                "The code expired after 2 minutes. "
+                "Return and request a new code."
+            )
+
+        elif (
+            hash_code(
+                request.form.get(
+                    "verification_code",
+                    "",
+                ).strip()
+            )
+            == verification["code_hash"]
+        ):
+            save_verified_email(
+                user["email"]
+            )
+
+            session.pop(
+                "verification",
+                None,
+            )
+
+            session["verified"] = True
+
+            return redirect(
+                url_for("dashboard")
+            )
+
+        else:
+            verification["attempts"] += 1
+
+            if (
+                verification["attempts"]
+                >= MAX_VERIFICATION_ATTEMPTS
+            ):
+                session.pop(
+                    "verification",
+                    None,
+                )
+
+                error = (
+                    "Five incorrect attempts were "
+                    "made. Request a new code."
+                )
+
+            else:
+                session["verification"] = (
+                    verification
+                )
+
+                attempts_left = (
+                    MAX_VERIFICATION_ATTEMPTS
+                    - verification["attempts"]
+                )
+
+                error = (
+                    "Incorrect code. "
+                    f"{attempts_left} attempts "
+                    "remaining."
+                )
+
+    return render_template(
+        "verify_email.html",
+        email=user["email"],
+        error=error,
+    )
+
+
+def require_verified():
+    return (
+        session.get("verified")
+        and session.get("user")
+    )
+
+
+@app.route(
+    "/dashboard",
+    methods=["GET", "POST"],
+)
+def dashboard():
+    if not require_verified():
+        return redirect(
+            url_for("identity")
+        )
+
+    if request.method == "POST":
+        action = request.form.get(
+            "action",
+            "",
+        )
+
+        if action in ACTIONS:
+            session["action"] = action
+
+            session.pop("cluster", None)
+            session.pop("application", None)
+
+            if action == "create":
+                return redirect(
+                    url_for("cluster_step")
+                )
+
+            if action == "deploy":
+                return redirect(
+                    url_for("cluster_select")
+                )
+
+            return redirect(
+                url_for("application_select")
+            )
+
+    return render_template(
+        "dashboard.html",
+        user=session["user"],
+    )
+
+
+@app.route(
+    "/cluster",
+    methods=["GET", "POST"],
+)
+def cluster_step():
+    if (
+        not require_verified()
+        or session.get("action") != "create"
+    ):
+        return redirect(
+            url_for("dashboard")
+        )
+
+    action = session["action"]
+
+    values = session.get(
+        "cluster",
+        {
+            "cluster_name": "",
+            "node_count": "",
+        },
+    )
+
+    errors = {}
+
+    if request.method == "POST":
+        raw_name = request.form.get(
+            "cluster_name",
+            "",
+        )
+
+        name = normalize_kubernetes_name(
+            raw_name
+        )
+
+        values = {
+            "cluster_name": raw_name,
+            "normalized_name": name,
+            "node_count": request.form.get(
+                "node_count",
+                "",
+            ),
         }
 
-        return render_template(
-            "result.html",
-            result=result,
-            user=None,
-            data=None,
-        )
+        if not valid_kubernetes_name(name):
+            errors["cluster_name"] = (
+                "Enter a name containing "
+                "letters or numbers."
+            )
 
+        try:
+            nodes = parse_integer(
+                values["node_count"],
+                "Node count",
+                1,
+                MAX_NODE_COUNT,
+            )
 
-@app.route("/verify-email", methods=["GET", "POST"])
-def verify_email():
-    verification = session.get("verification")
-    pending_deployment = session.get(
-        "pending_deployment"
+        except ValueError as error:
+            errors["node_count"] = str(error)
+
+        if not errors:
+            owner = cluster_owner(name)
+
+            if (
+                owner
+                and owner
+                != session["user"]["email"]
+            ):
+                errors["cluster_name"] = (
+                    "This cluster name is unavailable."
+                )
+
+            elif (
+                cluster_exists(name)
+                and owner is None
+                and os.environ.get(
+                    "ALLOW_LEGACY_RESOURCE_CLAIM"
+                )
+                != "1"
+            ):
+                errors["cluster_name"] = (
+                    "This existing cluster is not "
+                    "assigned to your account. Ask the "
+                    "administrator to enable a "
+                    "controlled legacy claim."
+                )
+
+        if not errors:
+            session["cluster"] = {
+                "cluster_name": name,
+                "node_count": nodes,
+                "original_name": (
+                    raw_name.strip()
+                ),
+            }
+
+            return redirect(
+                url_for("confirmation")
+            )
+
+    return field_error(
+        "cluster_form.html",
+        errors,
+        values,
+        action=action,
     )
 
-    if not verification or not pending_deployment:
-        return redirect(url_for("home"))
 
-    if request.method == "GET":
-        return render_template(
-            "verify_email.html",
-            email=verification["email"],
-            error=None,
+@app.route(
+    "/select-cluster",
+    methods=["GET", "POST"],
+)
+def cluster_select():
+    if (
+        not require_verified()
+        or session.get("action") != "deploy"
+    ):
+        return redirect(
+            url_for("dashboard")
         )
 
-    entered_code = (
-        request.form.get("verification_code", "")
-        .strip()
+    try:
+        clusters = list_cluster_choices(
+            owned_cluster_names(
+                session["user"]["email"]
+            )
+        )
+
+    except RuntimeError as error:
+        clusters = []
+        discovery_error = str(error)
+
+    else:
+        discovery_error = None
+
+    error = None
+
+    if request.method == "POST":
+        selected = request.form.get(
+            "cluster_name",
+            "",
+        )
+
+        match = next(
+            (
+                item
+                for item in clusters
+                if item["name"] == selected
+            ),
+            None,
+        )
+
+        if match is None:
+            error = (
+                "Choose an existing cluster."
+            )
+
+        elif match["node_count"] < 1:
+            error = (
+                "The cluster node count could not "
+                "be determined. Start or resize it "
+                "from Create cluster first."
+            )
+
+        else:
+            session["cluster"] = {
+                "cluster_name": match["name"],
+                "node_count": match["node_count"],
+                "original_name": match["name"],
+            }
+
+            return redirect(
+                url_for("application_step")
+            )
+
+    return render_template(
+        "cluster_select.html",
+        clusters=clusters,
+        error=error,
+        discovery_error=discovery_error,
     )
 
-    if time.time() > verification["expires_at"]:
-        session.pop("verification", None)
-        session.pop("pending_deployment", None)
 
-        return render_template(
-            "verify_email.html",
-            email=verification["email"],
-            error=(
-                "The verification code has expired. "
-                "Return to the form and try again."
+@app.route(
+    "/select-application",
+    methods=["GET", "POST"],
+)
+def application_select():
+    if (
+        not require_verified()
+        or session.get("action")
+        not in {
+            "update",
+            "delete",
+            "inspect",
+        }
+    ):
+        return redirect(
+            url_for("dashboard")
+        )
+
+    try:
+        email = session["user"]["email"]
+
+        applications = list_application_choices(
+            allowed_cluster_names=(
+                owned_cluster_names(email)
+            ),
+            allowed_application_keys=(
+                owned_application_keys(email)
             ),
         )
 
-    verification["attempts"] += 1
-    session["verification"] = verification
+    except RuntimeError as error:
+        applications = []
+        discovery_error = str(error)
+
+    else:
+        discovery_error = None
+
+    error = None
+
+    if request.method == "POST":
+        selected = request.form.get(
+            "application_key",
+            "",
+        )
+
+        match = next(
+            (
+                item
+                for item in applications
+                if item["key"] == selected
+            ),
+            None,
+        )
+
+        if match is None:
+            error = (
+                "Choose an existing application."
+            )
+
+        else:
+            session["cluster"] = {
+                "cluster_name": (
+                    match["cluster_name"]
+                ),
+                "node_count": (
+                    match["node_count"]
+                ),
+                "original_name": (
+                    match["cluster_name"]
+                ),
+            }
+
+            session["application"] = {
+                key: match[key]
+                for key in (
+                    "app_name",
+                    "namespace",
+                    "image",
+                    "replicas",
+                    "port",
+                    "cpu_request",
+                    "memory_request",
+                )
+            }
+
+            if session["action"] == "update":
+                return redirect(
+                    url_for("application_step")
+                )
+
+            return redirect(
+                url_for("confirmation")
+            )
+
+    return render_template(
+        "application_select.html",
+        applications=applications,
+        error=error,
+        discovery_error=discovery_error,
+        action=session["action"],
+    )
+
+
+@app.route(
+    "/application",
+    methods=["GET", "POST"],
+)
+def application_step():
+    if not require_verified():
+        return redirect(
+            url_for("identity")
+        )
+
+    action = session["action"]
+
+    if not session.get("cluster"):
+        endpoint = (
+            "cluster_select"
+            if action == "deploy"
+            else "application_select"
+        )
+
+        return redirect(
+            url_for(endpoint)
+        )
+
+    values = (
+        session.get("application", {})
+        if action == "update"
+        else {}
+    )
+
+    errors = {}
+
+    if request.method == "POST":
+        keys = [
+            "app_name",
+            "image",
+            "replicas",
+            "port",
+            "cpu_request",
+            "memory_request",
+        ]
+
+        values = {
+            key: request.form.get(
+                key,
+                "",
+            ).strip()
+            for key in keys
+        }
+
+        if action == "update":
+            values["app_name"] = (
+                session["application"]["app_name"]
+            )
+
+        app_name = normalize_kubernetes_name(
+            values["app_name"]
+        )
+
+        if not valid_kubernetes_name(app_name):
+            errors["app_name"] = (
+                "Enter an application name "
+                "containing letters or numbers."
+            )
+
+        data = {
+            "app_name": app_name,
+            "original_name": values["app_name"],
+        }
+
+        if action == "update":
+            data["namespace"] = (
+                session["application"].get(
+                    "namespace",
+                    "default",
+                )
+            )
+
+        if action in {"deploy", "update"}:
+            image = normalize_docker_image(
+                values["image"]
+            )
+
+            if (
+                not image
+                or re.search(r"\s", image)
+            ):
+                errors["image"] = (
+                    "Paste a Docker pull command "
+                    "such as 'docker pull httpd:2.4' "
+                    "or enter an image reference "
+                    "such as 'httpd:2.4'."
+                )
+
+            else:
+                data["image"] = image
+
+            integer_fields = [
+                (
+                    "replicas",
+                    "Replicas",
+                    1,
+                    100,
+                ),
+                (
+                    "port",
+                    "Port",
+                    1,
+                    65535,
+                ),
+            ]
+
+            for (
+                key,
+                label,
+                minimum,
+                maximum,
+            ) in integer_fields:
+                try:
+                    data[key] = parse_integer(
+                        values[key],
+                        label,
+                        minimum,
+                        maximum,
+                    )
+
+                except ValueError as error:
+                    errors[key] = str(error)
+
+            resource_fields = [
+                (
+                    "cpu_request",
+                    parse_cpu_millicores,
+                ),
+                (
+                    "memory_request",
+                    parse_memory_mib,
+                ),
+            ]
+
+            for key, parser in resource_fields:
+                try:
+                    data[key] = parser(
+                        values[key]
+                    )
+
+                except ValueError as error:
+                    errors[key] = str(error)
+
+        if not errors:
+            session["application"] = data
+
+            return redirect(
+                url_for("confirmation")
+            )
+
+    return field_error(
+        "application_form.html",
+        errors,
+        values,
+        action=action,
+        max_cpu=MAX_CPU_MILLICORES,
+        max_memory=MAX_MEMORY_MIB,
+    )
+
+
+@app.route(
+    "/confirmation",
+    methods=["GET", "POST"],
+)
+def confirmation():
+    if (
+        not require_verified()
+        or not session.get("cluster")
+    ):
+        return redirect(
+            url_for("dashboard")
+        )
 
     if (
-        verification["attempts"]
-        > MAX_VERIFICATION_ATTEMPTS
+        session["action"] != "create"
+        and not session.get("application")
     ):
-        session.pop("verification", None)
-        session.pop("pending_deployment", None)
-
-        return render_template(
-            "verify_email.html",
-            email=verification["email"],
-            error=(
-                "Too many incorrect attempts. "
-                "Return to the form and try again."
-            ),
+        return redirect(
+            url_for("application_step")
         )
 
-    entered_code_hash = hash_verification_code(
-        entered_code
+    if request.method == "GET":
+        token = uuid.uuid4().hex
+
+        session["confirmation_token"] = token
+
+        return render_template(
+            "confirmation.html",
+            action=session["action"],
+            cluster=session["cluster"],
+            app_data=session.get("application"),
+            token=token,
+        )
+
+    token = request.form.get("token")
+
+    if (
+        not token
+        or token
+        != session.pop(
+            "confirmation_token",
+            None,
+        )
+    ):
+        return render_template(
+            "result.html",
+            result={
+                "success": False,
+                "message": (
+                    "This confirmation was already "
+                    "used or is invalid."
+                ),
+            },
+        )
+
+    action = session["action"]
+    cluster = session["cluster"]
+    application = session.get(
+        "application"
+    )
+    user = session["user"]
+
+    result = execute_web_action(
+        action,
+        cluster,
+        application,
     )
 
-    if entered_code_hash != verification["code_hash"]:
-        attempts_left = (
-            MAX_VERIFICATION_ATTEMPTS
-            - verification["attempts"]
+    if result.get("success"):
+        if action == "create":
+            save_owned_cluster(
+                user["email"],
+                cluster["cluster_name"],
+            )
+
+        elif (
+            action == "deploy"
+            and application
+        ):
+            save_owned_cluster(
+                user["email"],
+                cluster["cluster_name"],
+            )
+
+            save_owned_application(
+                user["email"],
+                application,
+                cluster,
+            )
+
+        elif (
+            action == "delete"
+            and application
+        ):
+            remove_owned_application(
+                user["email"],
+                application,
+                cluster,
+            )
+
+    try:
+        send_operation_email(
+            user,
+            action,
+            cluster,
+            application,
+            result,
         )
 
-        return render_template(
-            "verify_email.html",
-            email=verification["email"],
-            error=(
-                "The verification code is incorrect. "
-                f"{attempts_left} attempts remaining."
-            ),
+        result["notification_sent"] = True
+
+        result["notification_message"] = (
+            "An operation notification was sent to "
+            f"{user['email']}."
         )
 
-    save_verified_email(verification["email"])
+    except (
+        OSError,
+        RuntimeError,
+        smtplib.SMTPException,
+    ) as email_error:
+        result["notification_sent"] = False
 
-    session.pop("verification", None)
-    session.pop("pending_deployment", None)
+        result["notification_message"] = (
+            "The operation finished, but its email "
+            "notification could not be sent: "
+            f"{email_error}"
+        )
 
-    return perform_deployment(
-        cluster_name=(
-            pending_deployment["cluster_name"]
-        ),
-        node_count=(
-            pending_deployment["node_count"]
-        ),
-        user_information=(
-            pending_deployment["user_information"]
-        ),
-        application_values=(
-            pending_deployment["application_values"]
-        ),
+    return render_template(
+        "result.html",
+        result=result,
+    )
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+
+    return redirect(
+        url_for("identity")
     )
 
 
 if __name__ == "__main__":
     initialize_database()
-    app.run(debug=True)
+
+    app.run(
+        debug=(
+            os.environ.get("FLASK_DEBUG")
+            == "1"
+        )
+    )

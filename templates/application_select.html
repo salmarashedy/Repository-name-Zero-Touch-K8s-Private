@@ -1,0 +1,60 @@
+```jinja
+{% extends "base.html" %}
+
+{% block heading %}
+  Choose an application
+{% endblock %}
+
+{% block intro %}
+  Select an application to {{ action }}. Its cluster is selected automatically.
+{% endblock %}
+
+{% block content %}
+  {% if discovery_error %}
+    <div class="error-box">
+      {{ discovery_error }}
+    </div>
+  {% endif %}
+
+  {% if error %}
+    <div class="error-box">
+      {{ error }}
+    </div>
+  {% endif %}
+
+  <form method="post">
+    <div class="form-group form-section">
+      <label for="application_key">Existing application</label>
+
+      <select id="application_key" name="application_key" required>
+        <option value="" selected disabled>
+          Select an application
+        </option>
+
+        {% for application in applications %}
+          <option value="{{ application.key }}">
+            {{ application.app_name }} — {{ application.cluster_name }}
+            {% if application.namespace != "default" %}
+              — {{ application.namespace }}
+            {% endif %}
+          </option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <button class="deploy-button" type="submit">
+      Continue
+    </button>
+  </form>
+
+  {% if not applications and not discovery_error %}
+    <div class="warning-box">
+      No applications were found in running Minikube clusters.
+    </div>
+  {% endif %}
+
+  <a class="back-link" href="{{ url_for('dashboard') }}">
+    Back to actions
+  </a>
+{% endblock %}
+```

@@ -1,3 +1,5 @@
+import json
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -9,7 +11,122 @@ from cluster_manager import (
     check_docker_running,
     check_required_commands,
     ensure_cluster,
+    cluster_is_running,
+    get_cluster_nodes,
 )
+
+
+def list_cluster_choices(allowed_names: set[str] | None = None) -> list[dict]:
+    """Return Minikube profiles without changing their state."""
+    result = subprocess.run(
+        ["minikube", "profile", "list", "-o", "json"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "Could not list Minikube clusters.")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Minikube returned invalid profile information.") from error
+
+    choices = []
+    for profile in payload.get("valid", []) + payload.get("invalid", []):
+        name = profile.get("Name")
+        if not name:
+            continue
+        if allowed_names is not None and name not in allowed_names:
+            continue
+        running = cluster_is_running(name)
+        config_nodes = profile.get("Config", {}).get("Nodes", [])
+        if isinstance(config_nodes, list):
+            configured_count = len(config_nodes)
+        elif isinstance(config_nodes, int):
+            configured_count = config_nodes
+        elif isinstance(config_nodes, str) and config_nodes.isdigit():
+            configured_count = int(config_nodes)
+        else:
+            configured_count = 0
+        if running:
+            try:
+                node_count = len(get_cluster_nodes(name))
+            except RuntimeError:
+                node_count = configured_count
+        else:
+            node_count = configured_count
+        choices.append({"name": name, "node_count": node_count, "running": running})
+    return sorted(choices, key=lambda item: item["name"])
+
+
+def _cpu_to_millicores(value: str) -> int:
+    value = str(value or "").strip()
+    if value.endswith("m") and value[:-1].isdigit():
+        return int(value[:-1])
+    if re.fullmatch(r"\d+", value):
+        return int(value) * 1000
+    return 0
+
+
+def _memory_to_mib(value: str) -> int:
+    value = str(value or "").strip()
+    match = re.fullmatch(r"(\d+)(Ki|Mi|Gi)", value)
+    if not match:
+        return 0
+    amount, unit = int(match.group(1)), match.group(2)
+    return {"Ki": amount // 1024, "Mi": amount, "Gi": amount * 1024}[unit]
+
+
+def list_application_choices(
+    allowed_cluster_names: set[str] | None = None,
+    allowed_application_keys: set[str] | None = None,
+) -> list[dict]:
+    """Discover Deployments from running Minikube clusters."""
+    applications = []
+    for cluster in list_cluster_choices(allowed_cluster_names):
+        if not cluster["running"]:
+            continue
+        result = subprocess.run(
+            ["kubectl", "--context", cluster["name"], "get", "deployments", "-A", "-o", "json"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            continue
+        try:
+            items = json.loads(result.stdout).get("items", [])
+        except json.JSONDecodeError:
+            continue
+        for item in items:
+            metadata = item.get("metadata", {})
+            namespace = metadata.get("namespace", "default")
+            if namespace == "kube-system":
+                continue
+            deployment_name = metadata.get("name", "")
+            labels = metadata.get("labels", {})
+            app_name = labels.get("app") or deployment_name.removesuffix("-deployment")
+            containers = item.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+            container = containers[0] if containers else {}
+            resources = container.get("resources", {}).get("requests", {})
+            ports = container.get("ports", [])
+            application_key = f'{cluster["name"]}|{namespace}|{app_name}'
+            if allowed_application_keys is not None and application_key not in allowed_application_keys:
+                continue
+            applications.append({
+                "key": application_key,
+                "cluster_name": cluster["name"],
+                "node_count": cluster["node_count"],
+                "namespace": namespace,
+                "app_name": app_name,
+                "deployment_name": deployment_name,
+                "image": container.get("image", ""),
+                "replicas": item.get("spec", {}).get("replicas", 1),
+                "port": ports[0].get("containerPort", 80) if ports else 80,
+                "cpu_request": _cpu_to_millicores(resources.get("cpu", "")),
+                "memory_request": _memory_to_mib(resources.get("memory", "")),
+            })
+    return sorted(applications, key=lambda item: (item["cluster_name"], item["app_name"]))
 
 from input_handler import (
     ask_app_name,
@@ -402,6 +519,8 @@ def deploy_application_from_web(
     values: dict,
 ) -> dict:
 
+    application_start_time = None
+
     try:
         print("\nWeb deployment request received")
         print("=" * 60)
@@ -433,24 +552,24 @@ def deploy_application_from_web(
             f'Connected successfully to "{cluster_name}".'
         )
 
-        # These values are fixed because they are not entered
-        # separately in the web form.
-        values["namespace"] = "default"
+        # Begin timing only the application deployment.
+        application_start_time = time.perf_counter()
+
+        values.setdefault("namespace", "default")
         values["service_type"] = "ClusterIP"
 
         generated_files = generate_yaml_files(values)
 
         if generated_files is None:
             raise RuntimeError(
-                "The Kubernetes YAML files could not be generated."
+                "The Kubernetes YAML files "
+                "could not be generated."
             )
 
         deployment_file, service_file = generated_files
 
         print("\nApplying Kubernetes resources...")
         print("-" * 50)
-
-        deployment_start_time = time.perf_counter()
 
         deployment_applied = apply_yaml(
             file_path=deployment_file,
@@ -459,7 +578,8 @@ def deploy_application_from_web(
 
         if not deployment_applied:
             raise RuntimeError(
-                "The Kubernetes Deployment could not be applied."
+                "The Kubernetes Deployment "
+                "could not be applied."
             )
 
         service_applied = apply_yaml(
@@ -469,7 +589,8 @@ def deploy_application_from_web(
 
         if not service_applied:
             raise RuntimeError(
-                "The Deployment was applied, but the Service failed."
+                "The Deployment was applied, "
+                "but the Service failed."
             )
 
         print("\nResources applied successfully.")
@@ -479,14 +600,16 @@ def deploy_application_from_web(
             cluster_name=cluster_name,
         )
 
-        deployment_duration = (
-            time.perf_counter() - deployment_start_time
+        application_duration = (
+            time.perf_counter()
+            - application_start_time
         )
 
         if not deployment_ready:
             raise RuntimeError(
-                "The resources were applied, but the Deployment "
-                "did not become ready within 120 seconds."
+                "The resources were applied, but the "
+                "Deployment did not become ready "
+                "within 120 seconds."
             )
 
         show_application_status(
@@ -495,8 +618,8 @@ def deploy_application_from_web(
         )
 
         print(
-            f"\nWeb deployment completed in "
-            f"{deployment_duration:.2f} seconds."
+            "\nWeb deployment completed in "
+            f"{application_duration:.2f} seconds."
         )
 
         return {
@@ -510,13 +633,20 @@ def deploy_application_from_web(
             "service_name": (
                 f'{values["app_name"]}-service'
             ),
-            "duration": round(
-                deployment_duration,
+            "application_duration": round(
+                application_duration,
                 2,
             ),
         }
 
     except Exception as error:
+        application_duration = (
+            time.perf_counter()
+            - application_start_time
+            if application_start_time is not None
+            else None
+        )
+
         print("\nWeb deployment failed.")
         print(f"Error: {error}")
 
@@ -528,9 +658,230 @@ def deploy_application_from_web(
                 "app_name",
                 "Unknown",
             ),
+            "application_duration": (
+                round(application_duration, 2)
+                if application_duration is not None
+                else None
+            ),
         }
 
 
+def _run_checked(command: list[str]) -> str:
+    result = subprocess.run(command, check=True, text=True, capture_output=True)
+    return result.stdout.strip()
+
+
+def execute_web_action(
+    action: str,
+    cluster: dict,
+    app_data: dict | None,
+) -> dict:
+    
+    #Execute an operation after the staged forms and one-use confirmation pass.
+
+
+    cluster_name = cluster["cluster_name"]
+    node_count = cluster["node_count"]
+    cluster_start_time = None
+
+    try:
+        if action == "create":
+            cluster_start_time = time.perf_counter()
+
+            check_required_commands()
+            check_docker_running()
+
+            cluster_result = ensure_cluster(
+                cluster_name,
+                node_count,
+            )
+
+            cluster_duration = (
+                time.perf_counter()
+                - cluster_start_time
+            )
+
+            return {
+                "success": True,
+                "message": (
+                    f"Cluster '{cluster_name}' is ready."
+                ),
+                "checks": [
+                    cluster_result,
+                    (
+                        f"Verified {node_count} "
+                        "Ready node(s)."
+                    ),
+                ],
+                "cluster_duration": round(
+                    cluster_duration,
+                    2,
+                ),
+            }
+
+        if app_data is None:
+            raise ValueError(
+                "Application information is missing."
+            )
+
+        app_name = app_data["app_name"]
+
+        namespace = app_data.get(
+            "namespace",
+            "default",
+        )
+
+        if action in {"deploy", "update"}:
+            values = dict(app_data)
+
+            values["cpu_request"] = (
+                f'{values["cpu_request"]}m'
+            )
+
+            values["cpu_limit"] = "1000m"
+
+            values["memory_request"] = (
+                f'{values["memory_request"]}Mi'
+            )
+
+            values["memory_limit"] = "1024Mi"
+
+            result = deploy_application_from_web(
+                cluster_name,
+                node_count,
+                values,
+            )
+
+            if result.get("success"):
+                if action == "update":
+                    result["message"] = (
+                        "Application updated and verified."
+                    )
+
+                else:
+                    result["message"] = (
+                        "Application deployed and verified."
+                    )
+
+            return result
+
+        if not context_exists(cluster_name):
+            raise RuntimeError(
+                f"Cluster '{cluster_name}' "
+                "does not exist."
+            )
+
+        if action == "delete":
+            deployment = (
+                f"{app_name}-deployment"
+            )
+
+            service = (
+                f"{app_name}-service"
+            )
+
+            _run_checked(
+                [
+                    "kubectl",
+                    "--context",
+                    cluster_name,
+                    "-n",
+                    namespace,
+                    "delete",
+                    "deployment",
+                    deployment,
+                ]
+            )
+
+            _run_checked(
+                [
+                    "kubectl",
+                    "--context",
+                    cluster_name,
+                    "-n",
+                    namespace,
+                    "delete",
+                    "service",
+                    service,
+                ]
+            )
+
+            return {
+                "success": True,
+                "message": (
+                    f"Application '{app_name}' "
+                    "was deleted."
+                ),
+                "checks": [
+                    "Deployment deleted.",
+                    "Service deleted.",
+                ],
+            }
+
+        if action == "inspect":
+            output = _run_checked(
+                [
+                    "kubectl",
+                    "--context",
+                    cluster_name,
+                    "-n",
+                    namespace,
+                    "get",
+                    "deployment,pods,service",
+                    "-l",
+                    f"app={app_name}",
+                    "-o",
+                    "wide",
+                ]
+            )
+
+            return {
+                "success": True,
+                "message": (
+                    "Current Kubernetes status "
+                    "collected."
+                ),
+                "details": output,
+            }
+
+        raise ValueError(
+            "Unsupported action."
+        )
+
+    except (
+        FileNotFoundError,
+        subprocess.CalledProcessError,
+        RuntimeError,
+        ValueError,
+    ) as error:
+        if (
+            isinstance(
+                error,
+                subprocess.CalledProcessError,
+            )
+            and error.stderr
+        ):
+            detail = error.stderr.strip()
+
+        else:
+            detail = str(error)
+
+        result = {
+            "success": False,
+            "message": detail,
+        }
+
+        if (
+            action == "create"
+            and cluster_start_time is not None
+        ):
+            result["cluster_duration"] = round(
+                time.perf_counter()
+                - cluster_start_time,
+                2,
+            )
+
+        return result
 # Complete terminal zero-touch deployment workflow
 def deploy_application_workflow() -> None:
 

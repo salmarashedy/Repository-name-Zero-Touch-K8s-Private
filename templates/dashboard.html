@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block heading %}Choose an action{% endblock %}
+
+{% block intro %}
+    Welcome {{ user.user_name }}. What would you like to do?
+{% endblock %}
+
+{% block content %}
+    <form method="POST">
+        <div class="action-grid">
+            {% for value, label, description in [
+                ('create', 'Create cluster', 'Create or reuse a Minikube profile.'),
+                ('deploy', 'Deploy application', 'Deploy a new Kubernetes application.'),
+                ('update', 'Update application', 'Change an image, replicas, or resources.'),
+                ('delete', 'Delete application', 'Delete its Deployment and Service.'),
+                ('inspect', 'Inspect status', 'View current application resources.')
+            ] %}
+                <button class="action-card" name="action" value="{{ value }}">
+                    <strong>{{ label }}</strong>
+                    <span>{{ description }}</span>
+                </button>
+            {% endfor %}
+        </div>
+    </form>
+
+    <a class="back-link" href="{{ url_for('logout') }}">Sign out</a>
+{% endblock %}

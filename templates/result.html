@@ -1,125 +1,89 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
+{% extends "base.html" %}
 
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
+{% block heading %}
+    {% if result.success %}
+        Operation completed
+    {% else %}
+        Operation failed
+    {% endif %}
+{% endblock %}
 
-    <title>Deployment Result</title>
+{% block intro %}
+    {{ result.message }}
+{% endblock %}
 
-    <link
-        rel="stylesheet"
-        href="{{ url_for('static', filename='style.css') }}"
-    >
-</head>
-
-<body>
-    <main class="page-container">
-        <section class="deployment-card">
-
+{% block content %}
+    {% if result.get("cluster_duration") is not none %}
+        <section
+            class="form-section
             {% if result.success %}
-                <header class="card-header">
-                    <div class="logo">✓</div>
-
-                    <div>
-                        <h1>Deployment Successful</h1>
-
-                        <p>
-                            {{ result.message }}
-                        </p>
-                    </div>
-                </header>
-
-                <section class="form-section result-box">
-                    <h2>Deployment Result</h2>
-
-                    <p>
-                        <strong>User:</strong>
-                        {{ user.user_name }}
-                    </p>
-
-                    <p>
-                        <strong>Email:</strong>
-                        {{ user.email }}
-                    </p>
-
-                    <p>
-                        <strong>Cluster:</strong>
-                        {{ result.cluster_name }}
-                    </p>
-
-                    <p>
-                        <strong>Cluster nodes:</strong>
-                        {{ result.node_count }}
-                    </p>
-
-                    <p>
-                        <strong>Cluster action:</strong>
-                        {{ result.cluster_result }}
-                    </p>
-
-                    <p>
-                        <strong>Application:</strong>
-                        {{ result.app_name }}
-                    </p>
-
-                    <p>
-                        <strong>Docker image:</strong>
-                        {{ data.image }}
-                    </p>
-
-                    <p>
-                        <strong>Replicas:</strong>
-                        {{ result.replicas }}
-                    </p>
-
-                    <p>
-                        <strong>Service:</strong>
-                        {{ result.service_name }}
-                    </p>
-
-                    <p>
-                        <strong>Deployment time:</strong>
-                        {{ result.duration }} seconds
-                    </p>
-                </section>
-{% if result.email_sent %}
-    <p class="email-success">
-        <strong>Email:</strong>
-        {{ result.email_message }}
-    </p>
-{% else %}
-    <p class="email-error">
-        <strong>Email:</strong>
-        {{ result.email_message }}
-    </p>
-{% endif %}
+                result-box
             {% else %}
-                <header class="card-header error-header">
-                    <div class="logo error-logo">!</div>
-
-                    <div>
-                        <h1>Deployment Failed</h1>
-
-                        <p>
-                            The application could not be deployed.
-                        </p>
-                    </div>
-                </header>
-
-                <section class="form-section error-box">
-                    <h2>Error</h2>
-                    <p>{{ result.message }}</p>
-                </section>
-            {% endif %}
-
-            <a href="/" class="deploy-button back-button">
-                Back to Form
-            </a>
+                error-box
+            {% endif %}"
+        >
+            <p>
+                <strong>Cluster deployment time:</strong>
+                {{ "%.2f"|format(result.cluster_duration) }}
+                seconds
+            </p>
         </section>
-    </main>
-</body>
-</html>
+    {% endif %}
+
+    {% if result.get("application_duration") is not none %}
+        <section
+            class="form-section
+            {% if result.success %}
+                result-box
+            {% else %}
+                error-box
+            {% endif %}"
+        >
+            <p>
+                <strong>Application deployment time:</strong>
+                {{ "%.2f"|format(result.application_duration) }}
+                seconds
+            </p>
+        </section>
+    {% endif %}
+
+    {% if result.get("checks") or result.get("details") %}
+        <section
+            class="form-section
+            {% if result.success %}
+                result-box
+            {% else %}
+                error-box
+            {% endif %}"
+        >
+            {% for check in result.get("checks", []) %}
+                <p>&#10003; {{ check }}</p>
+            {% endfor %}
+
+            {% if result.get("details") %}
+                <pre>{{ result.details }}</pre>
+            {% endif %}
+        </section>
+    {% endif %}
+
+    {% if result.get("notification_message") %}
+        <p
+            class="
+            {% if result.get('notification_sent') %}
+                email-success
+            {% else %}
+                email-error
+            {% endif %}"
+        >
+            <strong>Email notification:</strong>
+            {{ result.notification_message }}
+        </p>
+    {% endif %}
+
+    <a
+        class="deploy-button back-button"
+        href="{{ url_for('dashboard') }}"
+    >
+        Return to dashboard
+    </a>
+{% endblock %}

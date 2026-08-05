@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block heading %}
+    Confirm {{ action }}
+{% endblock %}
+
+{% block intro %}
+    Review the selected resources before running any command.
+{% endblock %}
+
+{% block content %}
+<section class="form-section result-box">
+    <p>
+        <strong>Cluster:</strong>
+        {{ cluster.cluster_name }}
+    </p>
+
+    <p>
+        <strong>Nodes:</strong>
+        {{ cluster.node_count }}
+    </p>
+
+    {% if app_data %}
+        <p>
+            <strong>Application:</strong>
+            {{ app_data.app_name }}
+        </p>
+
+        {% if app_data.image %}
+            <p>
+                <strong>Docker image:</strong>
+                {{ app_data.image }}
+            </p>
+
+            <p>
+                <strong>Replicas:</strong>
+                {{ app_data.replicas }}
+            </p>
+
+            <p>
+                <strong>Container port:</strong>
+                {{ app_data.port }}
+            </p>
+
+            <p>
+                <strong>CPU request:</strong>
+                {{ app_data.cpu_request }} millicores
+            </p>
+
+            <p>
+                <strong>Memory request:</strong>
+                {{ app_data.memory_request }} MiB
+            </p>
+        {% endif %}
+    {% endif %}
+</section>
+
+{% if action == 'delete' %}
+    <div class="warning-box">
+        The Deployment and Service will be deleted.
+        This cannot be undone through this interface.
+    </div>
+{% endif %}
+
+<form
+    method="post"
+    onsubmit="this.querySelector('button').disabled=true"
+>
+    <input
+        type="hidden"
+        name="token"
+        value="{{ token }}"
+    >
+
+    <button class="deploy-button">
+        Confirm and execute
+    </button>
+</form>
+
+<a
+    class="back-link"
+    href="{% if action == 'create' %}{{ url_for('cluster_step') }}{% elif action == 'deploy' %}{{ url_for('application_step') }}{% else %}{{ url_for('application_select') }}{% endif %}"
+>
+    Cancel
+</a>
+{% endblock %}

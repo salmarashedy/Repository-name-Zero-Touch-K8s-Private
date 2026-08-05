@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Zero-Touch Kubernetes{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <main class="page-container">
+        <section class="deployment-card">
+            <header class="card-header">
+                <div class="logo">&#9729;</div>
+                <div>
+                    <h1>{% block heading %}Zero-Touch Kubernetes{% endblock %}</h1>
+                    <p>{% block intro %}{% endblock %}</p>
+                </div>
+            </header>
+
+            {% block content %}{% endblock %}
+        </section>
+    </main>
+</body>
+</html>

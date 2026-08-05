@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block heading %}
+    {{ action|title }} application
+{% endblock %}
+
+{% block intro %}
+    {% if action == 'update' %}
+        Current values are loaded from Kubernetes.
+        Change only what you need.
+    {% else %}
+        Enter the application configuration for the selected cluster.
+    {% endif %}
+{% endblock %}
+
+{% block content %}
+<form method="post">
+    <section class="form-section">
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="app_name">
+                    Application name
+                </label>
+
+                <input
+                    id="app_name"
+                    name="app_name"
+                    value="{{ values.get('app_name', '') }}"
+                    {% if action == 'update' %}readonly{% endif %}
+                    required
+                >
+
+                {% if action != 'update' %}
+                    <small>
+                        Spaces and capital letters are converted automatically.
+                    </small>
+                {% endif %}
+
+                {% if errors.get('app_name') %}
+                    <small class="field-error">
+                        {{ errors.app_name }}
+                    </small>
+                {% endif %}
+            </div>
+
+            <div class="form-group">
+                <label for="image">
+                    Docker image
+                </label>
+
+                <input
+                    id="image"
+                    name="image"
+                    value="{{ values.get('image', '') }}"
+                    placeholder="Paste: docker pull httpd:2.4"
+                    required
+                >
+
+                <small>
+                    Copy the pull command from Docker Hub and paste it here.
+                    The system extracts the image automatically.
+                </small>
+
+                {% if errors.get('image') %}
+                    <small class="field-error">
+                        {{ errors.image }}
+                    </small>
+                {% endif %}
+            </div>
+
+            {% for key, label, max_value in [
+                ('replicas', 'Replicas', 100),
+                ('port', 'Container port', 65535),
+                ('cpu_request', 'CPU request (millicores)', max_cpu),
+                ('memory_request', 'Memory request (MiB)', max_memory)
+            ] %}
+                <div class="form-group">
+                    <label for="{{ key }}">
+                        {{ label }}
+                    </label>
+
+                    <input
+                        type="number"
+                        inputmode="numeric"
+                        id="{{ key }}"
+                        name="{{ key }}"
+                        value="{{ values.get(key, '') }}"
+                        min="1"
+                        max="{{ max_value }}"
+                        step="1"
+                        required
+                    >
+
+                    {% if key == 'port' %}
+                        <small>
+                            Type the exact port used by your service.
+                            Valid range: 1–65535.
+                        </small>
+                    {% elif key == 'cpu_request' %}
+                        <small>
+                            Type a whole number from 1 to
+                            {{ max_cpu }} millicores.
+                        </small>
+                    {% elif key == 'memory_request' %}
+                        <small>
+                            Type a whole number from 1 to
+                            {{ max_memory }} MiB.
+                        </small>
+                    {% endif %}
+
+                    {% if errors.get(key) %}
+                        <small class="field-error">
+                            {{ errors[key] }}
+                        </small>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        </div>
+    </section>
+
+    <button class="deploy-button">
+        Review operation
+    </button>
+</form>
+
+<a
+    class="back-link"
+    href="{% if action == 'update' %}{{ url_for('application_select') }}{% else %}{{ url_for('cluster_select') }}{% endif %}"
+>
+    Back
+</a>
+{% endblock %}

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block heading %}Welcome{% endblock %}
+
+{% block intro %}
+    Verify your identity before managing Kubernetes resources.
+{% endblock %}
+
+{% block content %}
+    <form method="POST">
+        <section class="form-section">
+            <div class="form-grid">
+                {% for key, label, type in [
+                    ('user_name', 'Name', 'text'),
+                    ('email', 'Email', 'email')
+                ] %}
+                    <div class="form-group">
+                        <label for="{{ key }}">{{ label }}</label>
+                        <input
+                            type="{{ type }}"
+                            id="{{ key }}"
+                            name="{{ key }}"
+                            value="{{ values.get(key, '') }}"
+                            required
+                        >
+
+                        {% if errors.get(key) %}
+                            <small class="field-error">{{ errors[key] }}</small>
+                        {% endif %}
+                    </div>
+                {% endfor %}
+            </div>
+        </section>
+
+        <button class="deploy-button" type="submit">Continue</button>
+    </form>
+{% endblock %}

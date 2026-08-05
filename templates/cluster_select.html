@@ -1,0 +1,60 @@
+```jinja
+{% extends "base.html" %}
+
+{% block heading %}
+  Choose a cluster
+{% endblock %}
+
+{% block intro %}
+  Select the existing cluster where the application will be deployed.
+{% endblock %}
+
+{% block content %}
+  {% if discovery_error %}
+    <div class="error-box">
+      {{ discovery_error }}
+    </div>
+  {% endif %}
+
+  {% if error %}
+    <div class="error-box">
+      {{ error }}
+    </div>
+  {% endif %}
+
+  <form method="post">
+    <div class="form-group form-section">
+      <label for="cluster_name">Existing cluster</label>
+
+      <select id="cluster_name" name="cluster_name" required>
+        <option value="" selected disabled>
+          Select a cluster
+        </option>
+
+        {% for cluster in clusters %}
+          <option value="{{ cluster.name }}">
+            {{ cluster.name }} — {{ cluster.node_count }} node(s)
+            {% if not cluster.running %}
+              — stopped
+            {% endif %}
+          </option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <button class="deploy-button" type="submit">
+      Continue
+    </button>
+  </form>
+
+  {% if not clusters and not discovery_error %}
+    <div class="warning-box">
+      No Minikube clusters were found. Create a cluster first.
+    </div>
+  {% endif %}
+
+  <a class="back-link" href="{{ url_for('dashboard') }}">
+    Back to actions
+  </a>
+{% endblock %}
+```

@@ -1,74 +1,31 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
+{% extends "base.html" %}
 
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
+{% block heading %}Verify your email{% endblock %}
 
-    <title>Verify Email</title>
+{% block intro %}
+    Enter the code sent to {{ email }}. It expires after 2 minutes.
+{% endblock %}
 
-    <link
-        rel="stylesheet"
-        href="{{ url_for('static', filename='style.css') }}"
-    >
-</head>
+{% block content %}
+    {% if error %}
+        <div class="error-box">{{ error }}</div>
+    {% endif %}
 
-<body>
-    <main class="container">
-        <section class="form-card verification-card">
-            <div class="logo">✉</div>
+    <form method="POST">
+        <div class="form-group form-section">
+            <label for="verification_code">Six-digit code</label>
+            <input
+                id="verification_code"
+                name="verification_code"
+                inputmode="numeric"
+                pattern="[0-9]{6}"
+                maxlength="6"
+                required
+            >
+        </div>
 
-            <h1>Verify Your Email</h1>
+        <button class="deploy-button" type="submit">Verify</button>
+    </form>
 
-            <p>
-                We sent a 6-digit verification code to:
-            </p>
-
-            <p>
-                <strong>{{ email }}</strong>
-            </p>
-
-            <p>
-                Enter the code below to start the Kubernetes
-                deployment. The code expires in 10 minutes.
-            </p>
-
-            {% if error %}
-                <div class="error-box">
-                    <p>{{ error }}</p>
-                </div>
-            {% endif %}
-
-            <form method="POST">
-                <label for="verification_code">
-                    Verification code
-                </label>
-
-                <input
-                    type="text"
-                    id="verification_code"
-                    name="verification_code"
-                    maxlength="6"
-                    minlength="6"
-                    inputmode="numeric"
-                    pattern="[0-9]{6}"
-                    placeholder="Enter the 6-digit code"
-                    autocomplete="one-time-code"
-                    required
-                >
-
-                <button type="submit">
-                    Verify and Start Deployment
-                </button>
-            </form>
-
-            <a class="back-link" href="{{ url_for('home') }}">
-                Return to deployment form
-            </a>
-        </section>
-    </main>
-</body>
-</html>
+    <a class="back-link" href="{{ url_for('identity') }}">Start again</a>
+{% endblock %}
