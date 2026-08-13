@@ -1,91 +1,140 @@
-# Zero-Touch Kubernetes Deployment Application
+# Zero-Touch Kubernetes Cluster Deployment
 
-The Zero-Touch Kubernetes Deployment Application is a Flask-based web application that automates the creation of a Minikube cluster and the deployment of containerized applications to Kubernetes.
+## Project Overview
 
-Instead of manually writing Kubernetes YAML files and running several commands, the user enters the required configuration through a web form. The application then verifies the email address, prepares the cluster, generates the Kubernetes Deployment and Service files, applies them, and waits for the Pods to become ready.
+Zero-Touch Kubernetes Cluster Deployment is a Flask-based web application for managing local Minikube clusters and deploying containerized applications through a browser interface.
+
+The application generates Kubernetes Deployment and Service manifests and performs the required Docker, Minikube, and `kubectl` operations. This allows users to work with Kubernetes without manually writing YAML files or running every Kubernetes command.
+
+The system runs locally and uses Docker Desktop, Minikube, and `kubectl` installed on the operator's computer.
+
+---
 
 ## Main Features
 
-- Simple web interface built with Flask
-- Email verification using a 6-digit code
-- Automatic checking of Docker, Minikube, and kubectl
-- Automatic Minikube cluster creation and startup
-- Support for single-node and multi-node clusters
-- Dynamic generation of Kubernetes Deployment and Service files
-- Configurable Docker image and container port
-- Configurable number of replicas and nodes
-- Configurable CPU and memory requests and limits
-- Configurable namespace and Kubernetes Service type
-- Automatic deployment using kubectl
-- Automatic waiting until the Pods become ready
-- Deployment result displayed through the website
-- Email notification after deployment
+- Email verification using a six-digit code
+- Local Minikube cluster creation
+- Support for clusters containing 1-5 nodes
+- Automatic startup of existing stopped clusters
+- Reuse and resizing of existing clusters
+- Application deployment using container images
+- Configuration of replicas, port, CPU, and memory
+- Application updates
+- Application status inspection
+- Application deletion
+- Input validation before execution
+- Kubernetes Deployment and Service generation
+- Operation results displayed in the web UI
+- Success or failure notifications sent by email
+- Cluster deployment time displayed in the UI and email
+- Application deployment time displayed in the UI and email
+- Local ownership filtering based on verified email addresses
+- One-use confirmation tokens to reduce duplicate operations
+- Basic Kubernetes Pod replacement and replica maintenance
 
-## Application Workflow
+---
+
+## Simple System Workflow
 
 ```mermaid
 flowchart TD
-    A["User opens web form"] --> B["app.py validates input"]
+    A["Start the web application"] --> B["Enter name and email"]
     B --> C{"Email already verified?"}
-    C -- No --> D["Send 6-digit code"]
-    D --> E["User verifies email"]
-    C -- Yes --> F["Prepare cluster"]
-    E --> F
-    F --> G["cluster_manager.py creates or starts Minikube"]
-    G --> H["deployment_manager.py generates YAML"]
-    H --> I["kubectl applies Deployment and Service"]
-    I --> J["Wait for Pods to become Ready"]
-    J --> K["Show result and send email"]
+
+    C -- "No" --> D["Receive verification code"]
+    D --> E["Enter verification code"]
+    E --> F{"Code valid?"}
+
+    F -- "No" --> D
+    F -- "Yes" --> G["Open dashboard"]
+    C -- "Yes" --> G
+
+    G --> H{"Choose an operation"}
+
+    H --> I["Create or resize cluster"]
+    H --> J["Deploy application"]
+    H --> K["Update application"]
+    H --> L["Inspect application"]
+    H --> M["Delete application"]
+
+    I --> N["Enter or select information"]
+    J --> N
+    K --> N
+    L --> N
+    M --> N
+
+    N --> O["Validate information"]
+    O --> P{"Information valid?"}
+
+    P -- "No" --> Q["Display validation errors"]
+    Q --> N
+
+    P -- "Yes" --> R["Review and confirm"]
+    R --> S["Execute Kubernetes operation"]
+    S --> T{"Operation successful?"}
+
+    T -- "Yes" --> U["Display success and deployment time"]
+    T -- "No" --> V["Display failure and available timing"]
+
+    U --> W["Send result by email"]
+    V --> W
 ```
 
-## Main Files
-
-- `app.py` runs the Flask web application and handles the form, email verification, and deployment requests.
-- `cluster_manager.py` checks the required commands and creates, starts, or reuses the requested Minikube cluster.
-- `deployment_manager.py` generates and applies the Kubernetes Deployment and Service files.
-- `input_handler.py` validates the values entered by the user.
-- `main.py` provides the command-line version of the deployment process.
-- `requirements.txt deployment process.
-- `` contains the required Python packages.
-- `templates/` contains the HTML pages and Kubernetes Jinja templates.
-- `static/style.css` contains the website styling.
+---
 
 ## Requirements
 
-Before using the application, install:
+Install the following programs before using the project:
 
-- Python 3
-- Docker Desktop
-- Minikube
-- kubectl
-- Git
+| Program | Purpose |
+|---|---|
+| Python 3.10 or newer | Runs the Flask application |
+| Git | Downloads and updates the project |
+| Docker Desktop | Provides the container runtime |
+| Minikube | Creates local Kubernetes clusters |
+| kubectl | Applies and verifies Kubernetes resources |
+| Web browser | Opens the web interface |
+| Gmail account | Sends verification codes and operation results |
 
-An internet connection is required to download container images and send email notifications.
+Check the required programs from PowerShell:
 
-Docker Desktop must be running before the application creates or starts a Minikube cluster.
+```powershell
+py --version
+git --version
+docker --version
+minikube version
+kubectl version --client
+```
 
-# User Manual
+Each command should display version information.
 
-## 1. Download the Project
+If a command is not recognized, install the missing program and ensure it is available through the Windows `PATH`.
 
-Open PowerShell and clone the repository:
+---
+
+## Download and Installation
+
+### Option 1: Clone the repository
+
+Open PowerShell in the folder where you want to download the project:
 
 ```powershell
 git clone https://github.com/SenSeLab26/K8s-Cluster-Deployment-Scenario1.git
-```
-
-Enter the project folder:
-
-```powershell
 cd K8s-Cluster-Deployment-Scenario1
 ```
 
-## 2. Create a Virtual Environment
+### Option 2: Download the ZIP file
 
-Create the Python virtual environment:
+1. Open the [GitHub repository](https://github.com/SenSeLab26/K8s-Cluster-Deployment-Scenario1).
+2. Click the green **Code** button.
+3. Select **Download ZIP**.
+4. Extract the downloaded file.
+5. Open PowerShell inside the extracted project folder.
+
+### Create a virtual environment
 
 ```powershell
-py -m venv .venv
+py -3 -m venv .venv
 ```
 
 Activate it:
@@ -94,342 +143,593 @@ Activate it:
 .\.venv\Scripts\Activate.ps1
 ```
 
-When it is activated, `(.venv)` should appear at the beginning of the PowerShell line.
+The PowerShell prompt should begin with:
 
-If PowerShell prevents activation, run:
+```text
+(.venv)
+```
+
+If PowerShell blocks the activation script:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-```
-
-Then activate the environment again:
-
-```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-## 3. Install the Required Packages
+This execution-policy change applies only to the current PowerShell window.
 
-Run:
+Do not copy `.venv` from another computer. Create a fresh virtual environment on every destination machine.
 
-```powershell
-py -m pip install -r requirements.txt
-```
+### Install the Python packages
 
-This installs Flask, Jinja2, and the other Python packages required by the application.
-
-## 4. Configure Email Notifications
-
-The application uses a Gmail account to send verification codes and deployment notifications.
-
-Set the sender email and Gmail App Password in the same PowerShell window:
+Ensure the virtual environment is active:
 
 ```powershell
-$env:SENDER_EMAIL="your-email@gmail.com"
-$env:GMAIL_APP_PASSWORD="your-app-password"
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-Replace the example values with the email address and App Password used by the application.
+Wait until installation finishes without errors.
 
-Do not write the real App Password inside the source code or upload it to GitHub.
+---
 
-These environment variables are temporary. If you close PowerShell, you must set them again when you open a new window.
+## Gmail Configuration
 
-## 5. Start Docker Desktop
+The application uses Gmail to send:
 
-Open Docker Desktop and wait until the Docker Engine is running.
+- Six-digit email verification codes
+- Kubernetes operation results
+- Cluster deployment time
+- Application deployment time
 
-You can check it from PowerShell using:
+### Create a Google App Password
+
+1. Open your Google Account.
+2. Select **Security**.
+3. Enable **2-Step Verification**.
+4. Open **App Passwords**.
+5. Create an App Password.
+6. Copy the generated password.
+
+Use the generated App Password, not the normal Gmail password.
+
+### Configure the Gmail environment variables
+
+In the same PowerShell window that will run Flask:
+
+```powershell
+$env:SENDER_EMAIL = "your-email@gmail.com"
+$env:GMAIL_APP_PASSWORD = "your-google-app-password"
+```
+
+Replace the placeholders with your real information.
+
+These variables are temporary. Configure them again after closing and reopening PowerShell.
+
+Never place your Gmail password or App Password directly inside the project files.
+
+### Optional Flask settings
+
+The application works without manually configuring these settings:
+
+```powershell
+$env:FLASK_SECRET_KEY = "replace-with-a-long-random-secret"
+$env:FLASK_DEBUG = "0"
+```
+
+If `FLASK_SECRET_KEY` is missing, the application generates a temporary random secret when it starts. This is suitable for local testing, but restarting the application invalidates existing browser sessions.
+
+Debug mode is disabled unless `FLASK_DEBUG` is explicitly set to `1`.
+
+The repository contains `.env.example` as a configuration reference. The current application does not automatically load `.env` files, so environment variables must be configured in PowerShell before starting Flask.
+
+---
+
+## Start the System
+
+### 1. Start Docker Desktop
+
+Starting Docker Desktop manually before using the application is recommended.
+
+Open Docker Desktop and wait for the Docker Engine to become ready.
+
+Check Docker:
 
 ```powershell
 docker info
 ```
 
-If this command produces Docker information without an engine connection error, Docker is ready.
+The application also checks Docker before executing a Kubernetes operation. On Windows, it may attempt to locate and start Docker Desktop automatically if the engine is stopped.
 
-## 6. Run the Application
-
-From the project folder, run:
-
-```powershell
-py app.py
-```
-
-PowerShell should show that the Flask development server is running.
-
-Open this address in your browser:
-
-```text
-http://127.0.0.1:5000
-```
-
-Do not close the PowerShell window while using the application.
-
-## 7. Complete the Deployment Form
-
-Enter the required information in the web form.
-
-### User Information
-
-- **Name:** The name of the user requesting the deployment.
-- **Email:** The address that receives the verification code and deployment notification.
-
-### Cluster Information
-
-- **Cluster Name:** The name of the Minikube cluster.
-- **Number of Nodes:** The number of Kubernetes nodes required in the cluster.
-
-### Application Information
-
-- **Application Name:** The name used for the Kubernetes Deployment and Service.
-- **Docker Image:** The container image to deploy, such as `nginx`.
-- **Replicas:** The number of Pod copies required.
-- **Container Port:** The port used by the container.
-
-### Resource Information
-
-- **CPU Request:** The CPU guaranteed to each container, such as `100m`.
-- **CPU Limit:** The maximum CPU allowed for each container, such as `1000m`.
-- **Memory Request:** The memory guaranteed to each container, such as `128Mi`.
-- **Memory Limit:** The maximum memory allowed for each container, such as `256Mi`.
-
-`1000m` represents one CPU core, while `100m` represents one-tenth of a CPU core. `Mi` represents mebibytes of memory.
-
-### Kubernetes Information
-
-- **Namespace:** The Kubernetes namespace used for the resources. The common value is `default`.
-- **Service Type:** The type of Kubernetes Service, such as `ClusterIP`, `NodePort`, or `LoadBalancer`.
-
-## 8. Verify the Email Address
-
-If the email address has not been verified before:
-
-1. The application sends a 6-digit verification code.
-2. Open the email inbox.
-3. Copy the verification code.
-4. Enter it on the verification page.
-5. Submit the code.
-
-After successful verification, the deployment process continues automatically.
-
-## 9. Wait for the Deployment
-
-The application will:
-
-1. Validate the submitted values.
-2. Check that Docker, Minikube, and kubectl are available.
-3. Create a new Minikube cluster or reuse the requested cluster.
-4. Add or start the required nodes.
-5. Wait until the Kubernetes nodes become ready.
-6. Generate the Deployment and Service YAML files.
-7. Apply the files using kubectl.
-8. Wait until the Pods become ready.
-9. Display the deployment result.
-10. Send a deployment notification by email.
-
-Creating a new multi-node cluster may take several minutes.
-
-Do not close Docker Desktop, PowerShell, or the browser while the deployment is running.
-
-## 10. Verify the Kubernetes Resources
-
-After deployment, open another PowerShell window and check the cluster profiles:
-
-```powershell
-minikube profile list
-```
-
-Select the required cluster context:
-
-```powershell
-kubectl config use-context CLUSTER_NAME
-```
-
-Replace `CLUSTER_NAME` with the cluster name entered in the form.
-
-Check the nodes:
-
-```powershell
-kubectl get nodes
-```
-
-Check the Deployments:
-
-```powershell
-kubectl get deployments
-```
-
-Check the Pods and the nodes running them:
-
-```powershell
-kubectl get pods -o wide
-```
-
-Check the Services:
-
-```powershell
-kubectl get services
-```
-
-For resources created in a different namespace, add:
-
-```powershell
--n NAMESPACE_NAME
-```
-
-For example:
-
-```powershell
-kubectl get pods -n test-namespace -o wide
-```
-
-## Example Configuration
-
-The following values can be used for a simple test:
-
-| Field | Example |
-|---|---|
-| Cluster name | `multi-node` |
-| Number of nodes | `2` |
-| Application name | `test-app` |
-| Docker image | `nginx` |
-| Replicas | `3` |
-| Container port | `80` |
-| CPU request | `100m` |
-| CPU limit | `1000m` |
-| Memory request | `128Mi` |
-| Memory limit | `256Mi` |
-| Namespace | `default` |
-| Service type | `ClusterIP` |
-
-The application is not limited to Nginx. Other container images can be used when they are available in an accessible container registry and the correct container port is provided.
-
-## Troubleshooting
-
-### Docker Engine Is Not Running
-
-If the application reports that Docker is unavailable:
-
-1. Open Docker Desktop.
-2. Wait until the Docker Engine starts.
-3. Run the deployment again.
-
-Check Docker using:
-
-```powershell
-docker info
-```
-
-### Minikube Cluster Does Not Start
-
-Check the cluster status:
-
-```powershell
-minikube status -p CLUSTER_NAME
-```
-
-Start it manually if necessary:
-
-```powershell
-minikube start -p CLUSTER_NAME
-```
-
-For a multi-node cluster:
-
-```powershell
-minikube start -p CLUSTER_NAME --nodes 2
-```
-
-### Pod Remains Pending
-
-Inspect the Pod:
-
-```powershell
-kubectl describe pod POD_NAME
-```
-
-A Pod may remain pending when the cluster does not have enough CPU or memory for the requested resources.
-
-Try using smaller resource values, such as:
-
-```text
-CPU request: 100m
-CPU limit: 500m
-Memory request: 64Mi
-Memory limit: 128Mi
-```
-
-### Image Cannot Be Pulled
-
-Check the Pod status:
-
-```powershell
-kubectl get pods
-```
-
-Inspect the affected Pod:
-
-```powershell
-kubectl describe pod POD_NAME
-```
-
-Confirm that:
-
-- The Docker image name is spelled correctly.
-- The image exists in the container registry.
-- The image is public, or Kubernetes has permission to access it.
-- The computer has an internet connection.
-
-### Email Is Not Received
-
-Check that:
-
-- The email address is correct.
-- The sender email is configured.
-- The Gmail App Password is correct.
-- The message is not in the spam folder.
-- The environment variables were set in the same PowerShell window running `app.py`.
-
-### PowerShell Cannot Activate the Virtual Environment
-
-Run:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-```
-
-Then:
+### 2. Activate the virtual environment
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-## Stopping the Application
+### 3. Configure Gmail
 
-To stop the Flask application, return to its PowerShell window and press:
+If the Gmail variables are not already configured:
+
+```powershell
+$env:SENDER_EMAIL = "your-email@gmail.com"
+$env:GMAIL_APP_PASSWORD = "your-google-app-password"
+```
+
+### 4. Start Flask
+
+```powershell
+python app.py
+```
+
+### 5. Open the web interface
+
+Open:
+
+[http://127.0.0.1:5000](http://127.0.0.1:5000)
+
+Keep the PowerShell window open while using the application.
+
+To stop Flask, return to PowerShell and press:
 
 ```text
 Ctrl + C
 ```
 
-To stop a Minikube cluster without deleting it:
+---
 
-```powershell
-minikube stop -p CLUSTER_NAME
+## How to Use the Web UI
+
+### Verify your email
+
+1. Enter your name.
+2. Enter your email address.
+3. Continue to the verification page.
+4. Check your email for the six-digit code.
+5. Enter the code in the web interface.
+6. Submit the code.
+
+The verification code expires after two minutes.
+
+Users have a maximum of five incorrect attempts.
+
+Previously verified email addresses are stored in the local SQLite database and may continue directly to the dashboard.
+
+### Create or resize a cluster
+
+1. Select **Create cluster**.
+2. Enter a cluster name.
+3. Enter a node count from 1 to 5.
+4. Review the operation.
+5. Confirm it.
+6. Wait for Minikube to complete the operation.
+7. Review the result.
+
+Cluster names are normalized automatically. For example:
+
+```text
+My Cluster
 ```
 
-To start it again later:
+becomes:
 
-```powershell
-minikube start -p CLUSTER_NAME
+```text
+my-cluster
 ```
 
-## Important Notes
+Depending on the existing state, the system can:
 
-- Keep Docker Desktop running while creating or managing clusters.
-- Never upload email passwords or Gmail App Passwords to GitHub.
-- Use valid Kubernetes resource values such as `100m` for CPU and `128Mi` for memory.
-- The Docker image must be accessible to Kubernetes.
-- Cluster creation may take several minutes.
-- Generated YAML files, verification data, virtual environments, and cache files should remain excluded through `.gitignore`.
-- Verify the deployment using `kubectl get nodes`, `kubectl get pods -o wide`, and `kubectl get services`.
+- Create a new Minikube cluster
+- Start a stopped cluster
+- Reuse a running cluster
+- Add worker nodes
+- Remove worker nodes
+- Verify that the requested nodes become Ready
+
+The result UI and operation email display:
+
+```text
+Cluster deployment time: X.XX seconds
+```
+
+### Deploy an application
+
+1. Select **Deploy application**.
+2. Select an existing cluster.
+3. Enter the application configuration.
+4. Review the values.
+5. Confirm the operation.
+6. Wait for Kubernetes to create and verify the resources.
+7. Review the result.
+
+Application inputs:
+
+| Input | Example | Accepted range |
+|---|---|---|
+| Application name | `nginx-app` | Kubernetes-compatible name |
+| Container image | `nginx:1.27-alpine` | Valid image reference |
+| Replicas | `3` | 1-100 |
+| Container port | `80` | 1-65535 |
+| CPU request | `100` | 1-1000 millicores |
+| Memory request | `128` | 1-1024 MiB |
+
+Enter CPU and memory as plain numbers.
+
+For example:
+
+```text
+CPU: 100
+Memory: 128
+```
+
+The application converts these values to:
+
+```text
+CPU request: 100m
+Memory request: 128Mi
+```
+
+The application uses fixed maximum limits:
+
+```text
+CPU limit: 1000m
+Memory limit: 1024Mi
+```
+
+The result UI and operation email display:
+
+```text
+Application deployment time: X.XX seconds
+```
+
+Application deployment time includes:
+
+- Generating Kubernetes YAML
+- Applying the Deployment
+- Applying the Service
+- Waiting for the Deployment to become ready
+
+It does not include cluster preparation or email transmission time.
+
+### Update an application
+
+1. Select **Update application**.
+2. Select an existing application.
+3. The associated cluster is selected automatically.
+4. Change the required configuration.
+5. Review the new values.
+6. Confirm the operation.
+7. Wait for Kubernetes to apply and verify the update.
+
+The application name cannot be changed during an update.
+
+The update can change:
+
+- Container image
+- Replica count
+- Container port
+- CPU request
+- Memory request
+
+The UI and email display the application deployment time.
+
+### Inspect an application
+
+1. Select **Inspect application**.
+2. Select an existing application.
+3. The associated cluster is selected automatically.
+4. Confirm the operation.
+5. Review the Kubernetes information.
+
+Inspection may display:
+
+- Deployment information
+- Pod status
+- Service information
+- Container image
+- Replica status
+- Resource settings
+
+Inspection does not modify the application.
+
+### Delete an application
+
+1. Select **Delete application**.
+2. Select an existing application.
+3. The associated cluster is selected automatically.
+4. Review the application carefully.
+5. Confirm deletion.
+6. Wait for the result.
+
+This deletes the application's Kubernetes Deployment and Service.
+
+It does not delete the Minikube cluster.
+
+---
+
+## Verify the Results
+
+Do not rely only on the web result page. Use `kubectl` to verify the actual Kubernetes state.
+
+Replace `<cluster-name>` with the selected cluster.
+
+### List Minikube profiles
+
+```powershell
+minikube profile list
+```
+
+### Check cluster status
+
+```powershell
+minikube status -p <cluster-name>
+```
+
+### Check cluster nodes
+
+```powershell
+kubectl --context <cluster-name> get nodes
+```
+
+All requested nodes should eventually show:
+
+```text
+Ready
+```
+
+### Check Deployments
+
+```powershell
+kubectl --context <cluster-name> get deployments
+```
+
+### Check Pods
+
+```powershell
+kubectl --context <cluster-name> get pods
+```
+
+Successfully started Pods normally show:
+
+```text
+Running
+```
+
+### Check Pod distribution
+
+```powershell
+kubectl --context <cluster-name> get pods -o wide
+```
+
+The `NODE` column shows which node runs each Pod.
+
+### Check Services
+
+```powershell
+kubectl --context <cluster-name> get services
+```
+
+### Check all important resources
+
+```powershell
+kubectl --context <cluster-name> get deployments,pods,services
+```
+
+### Verify an application deletion
+
+```powershell
+kubectl --context <cluster-name> get deployments
+kubectl --context <cluster-name> get pods
+kubectl --context <cluster-name> get services
+```
+
+The deleted application should no longer appear.
+
+---
+
+## Troubleshooting
+
+### Docker is not running
+
+Open Docker Desktop and wait until it becomes ready.
+
+```powershell
+docker info
+```
+
+Retry the operation after this command succeeds.
+
+### A required command is not recognized
+
+Example:
+
+```text
+'minikube' is not recognized
+```
+
+Install the missing program and ensure it is included in the Windows `PATH`.
+
+Restart PowerShell after updating `PATH`.
+
+### Virtual environment cannot be activated
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+### Existing virtual environment no longer works
+
+Delete and recreate `.venv` from inside the project directory:
+
+```powershell
+Remove-Item -Recurse -Force .venv
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+Confirm that PowerShell is inside the project directory before removing `.venv`.
+
+### Verification email was not received
+
+Check that:
+
+- The email address is correct.
+- The message is not in spam.
+- Gmail two-step verification is enabled.
+- A Google App Password is being used.
+- The environment variables were configured in the current terminal.
+- Flask was started from the same terminal.
+- The verification code has not expired.
+
+### Operation email settings are not configured
+
+Stop Flask and set:
+
+```powershell
+$env:SENDER_EMAIL = "your-email@gmail.com"
+$env:GMAIL_APP_PASSWORD = "your-google-app-password"
+```
+
+Restart Flask from the same PowerShell window.
+
+### `ImagePullBackOff` or `ErrImagePull`
+
+Test the image:
+
+```powershell
+docker pull <image-name>
+```
+
+Inspect the Pod:
+
+```powershell
+kubectl --context <cluster-name> describe pod <pod-name>
+```
+
+### Pod remains Pending
+
+```powershell
+kubectl --context <cluster-name> describe pod <pod-name>
+```
+
+Possible causes:
+
+- Insufficient CPU
+- Insufficient memory
+- Nodes are not ready
+- Scheduling constraints
+- Cluster still starting
+
+### Pod is running but not ready
+
+```powershell
+kubectl --context <cluster-name> logs <pod-name>
+kubectl --context <cluster-name> describe pod <pod-name>
+```
+
+### Cluster node is NotReady
+
+```powershell
+minikube status -p <cluster-name>
+kubectl --context <cluster-name> get nodes
+```
+
+Restart the cluster if necessary:
+
+```powershell
+minikube stop -p <cluster-name>
+minikube start -p <cluster-name>
+```
+
+### Deployment does not become ready
+
+```powershell
+kubectl --context <cluster-name> describe deployment <application-name>-deployment
+kubectl --context <cluster-name> get pods
+kubectl --context <cluster-name> describe pod <pod-name>
+kubectl --context <cluster-name> logs <pod-name>
+```
+
+### Service application failed
+
+A Deployment may remain after a Service failure.
+
+Inspect existing resources before retrying:
+
+```powershell
+kubectl --context <cluster-name> get deployments,services
+```
+
+---
+
+## Temporary Public Access
+
+By default, the web interface is available only on the operator's computer.
+
+For a controlled demonstration, Cloudflare Quick Tunnel can provide a temporary public link.
+
+Start Flask:
+
+```powershell
+python app.py
+```
+
+Open another PowerShell window:
+
+```powershell
+cloudflared tunnel --url http://127.0.0.1:5000
+```
+
+Cloudflare displays a temporary public URL.
+
+The following must remain running:
+
+- Operator's computer
+- Docker Desktop
+- Flask application
+- Required Minikube cluster
+- Cloudflare tunnel
+
+This is temporary demonstration access, not permanent production hosting.
+
+Before using a public tunnel:
+
+- Ensure `FLASK_DEBUG` is not set to `1`.
+- Use only non-sensitive test resources.
+- Share the URL only with trusted users.
+- Remember that inspection output may contain infrastructure details.
+- Stop the tunnel immediately after the demonstration.
+
+---
+
+## Security Notes
+
+- Never upload a Gmail App Password to GitHub.
+- Never write passwords directly inside Python files.
+- Never commit a real `.env` file.
+- Do not commit `verified_emails.db`.
+- Do not commit `.venv`.
+- Do not commit generated runtime manifests unless intentionally required.
+- Do not expose Flask debug mode publicly.
+- Do not use the Flask development server for permanent hosting.
+- Treat raw Kubernetes inspection output as sensitive.
+- Use proper authentication and Kubernetes RBAC before production use.
+- Local ownership records are not equivalent to Kubernetes authorization.
+- Use administrator-controlled roles and field visibility in a professional shared deployment.
+
+Recommended `.gitignore`:
+
+```gitignore
+.venv/
+venv/
+__pycache__/
+*.pyc
+generated/
+.vscode/
+verified_emails.db
+.env
+*.log
+.pytest_cache/
+```
