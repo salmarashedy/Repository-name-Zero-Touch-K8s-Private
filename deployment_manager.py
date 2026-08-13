@@ -98,6 +98,18 @@ def list_application_choices(
             items = json.loads(result.stdout).get("items", [])
         except json.JSONDecodeError:
             continue
+
+        pods_result = subprocess.run(
+            ["kubectl", "--context", cluster["name"], "get", "pods", "-A", "-o", "json"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        try:
+            pods = json.loads(pods_result.stdout).get("items", []) if pods_result.returncode == 0 else []
+        except json.JSONDecodeError:
+            pods = []
+            
         for item in items:
             metadata = item.get("metadata", {})
             namespace = metadata.get("namespace", "default")
@@ -113,6 +125,45 @@ def list_application_choices(
             application_key = f'{cluster["name"]}|{namespace}|{app_name}'
             if allowed_application_keys is not None and application_key not in allowed_application_keys:
                 continue
+            app_pods = [
+                pod for pod in pods
+                if pod.get("metadata", {}).get("namespace", "default") == namespace
+                and pod.get("metadata", {}).get("labels", {}).get("app") == app_name
+            ]
+            pod_states = []
+            for pod in app_pods:
+                statuses = pod.get("status", {}).get("containerStatuses", [])
+                waiting_reasons = [
+                    status.get("state", {}).get("waiting", {}).get("reason")
+                    for status in statuses
+                    if status.get("state", {}).get("waiting", {}).get("reason")
+                ]
+                pod_states.extend(waiting_reasons or [pod.get("status", {}).get("phase", "Unknown")])
+            ready_replicas = item.get("status", {}).get("readyReplicas", 0)
+            desired_replicas = item.get("spec", {}).get("replicas", 1)
+            failure_states = sorted(
+        { 
+            state
+            for state in pod_states
+                if state not in {
+                 "Running", "Succeeded",
+            }
+        }
+        )
+
+            if failure_states:
+                application_status = ", ".join(
+                    failure_states
+                )
+            elif ready_replicas == desired_replicas:
+                application_status = "Running"
+            elif pod_states:
+                application_status = ", ".join(
+                    sorted(set(pod_states))
+                )
+            else:
+                application_status = "Not Ready"
+
             applications.append({
                 "key": application_key,
                 "cluster_name": cluster["name"],
@@ -121,7 +172,9 @@ def list_application_choices(
                 "app_name": app_name,
                 "deployment_name": deployment_name,
                 "image": container.get("image", ""),
-                "replicas": item.get("spec", {}).get("replicas", 1),
+                "replicas": desired_replicas,
+                "ready_replicas": ready_replicas,
+                "status": application_status,
                 "port": ports[0].get("containerPort", 80) if ports else 80,
                 "cpu_request": _cpu_to_millicores(resources.get("cpu", "")),
                 "memory_request": _memory_to_mib(resources.get("memory", "")),
@@ -520,6 +573,7 @@ def deploy_application_from_web(
 ) -> dict:
 
     application_start_time = None
+    resources_applied = False
 
     try:
         print("\nWeb deployment request received")
@@ -593,6 +647,8 @@ def deploy_application_from_web(
                 "but the Service failed."
             )
 
+        resources_applied = True
+
         print("\nResources applied successfully.")
 
         deployment_ready = wait_for_deployment(
@@ -663,6 +719,7 @@ def deploy_application_from_web(
                 if application_duration is not None
                 else None
             ),
+            "resources_applied": resources_applied,
         }
 
 

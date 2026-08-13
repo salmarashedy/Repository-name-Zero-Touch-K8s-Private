@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 
+
 {% block heading %}
     {% if result.success %}
         Operation completed
@@ -8,9 +9,11 @@
     {% endif %}
 {% endblock %}
 
+
 {% block intro %}
     {{ result.message }}
 {% endblock %}
+
 
 {% block content %}
     {% if result.get("cluster_duration") is not none %}
@@ -30,6 +33,7 @@
         </section>
     {% endif %}
 
+
     {% if result.get("application_duration") is not none %}
         <section
             class="form-section
@@ -46,6 +50,7 @@
             </p>
         </section>
     {% endif %}
+
 
     {% if result.get("checks") or result.get("details") %}
         <section
@@ -66,6 +71,7 @@
         </section>
     {% endif %}
 
+
     {% if result.get("notification_message") %}
         <p
             class="
@@ -79,6 +85,40 @@
             {{ result.notification_message }}
         </p>
     {% endif %}
+
+
+    {% if result.get("failed_delete_token") %}
+        <section class="form-section warning-box">
+            <p>
+                <strong>The failed Kubernetes resources still exist.</strong>
+            </p>
+
+            <p>
+                The application did not become ready, but its Deployment
+                and Service were created. You can inspect the failed
+                application from the dashboard or delete its resources now.
+            </p>
+        </section>
+
+        <form
+            method="post"
+            action="{{ url_for('delete_failed_application') }}"
+        >
+            <input
+                type="hidden"
+                name="token"
+                value="{{ result.failed_delete_token }}"
+            >
+
+            <button
+                class="deploy-button danger-button"
+                type="submit"
+            >
+                Delete failed application
+            </button>
+        </form>
+    {% endif %}
+
 
     <a
         class="deploy-button back-button"

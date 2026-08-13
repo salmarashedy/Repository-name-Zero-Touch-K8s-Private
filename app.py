@@ -4,6 +4,7 @@ import random
 import re
 import smtplib
 import sqlite3
+import subprocess
 import time
 import uuid
 from email.message import EmailMessage
@@ -203,6 +204,53 @@ def normalize_docker_image(value: str) -> str:
         value = value[len("docker pull "):].strip()
 
     return value
+
+
+def valid_docker_image_reference(value: str) -> bool:
+    """Validate the common Docker/OCI image-reference syntax."""
+
+    return (
+        len(value) <= 255
+        and re.fullmatch(
+            r"(?:[a-zA-Z0-9.-]+(?::\d+)?/)?"
+            r"(?:[a-z0-9]+(?:[._-][a-z0-9]+)*/)*"
+            r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
+            r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?"
+            r"(?:@sha256:[a-fA-F0-9]{64})?",
+            value,
+        )
+        is not None
+    )
+
+
+def public_image_is_available(image: str) -> tuple[bool, str | None]:
+    """Check that Docker can resolve a public image without pulling it."""
+
+    try:
+        result = subprocess.run(
+            ["docker", "manifest", "inspect", image],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except FileNotFoundError:
+        return False, "Docker was not found. Start Docker Desktop and try again."
+    except subprocess.TimeoutExpired:
+        return False, "The image registry did not respond within 30 seconds."
+
+    if result.returncode == 0:
+        return True, None
+
+    detail = (result.stderr or result.stdout).strip().lower()
+    if "unauthorized" in detail or "denied" in detail:
+        message = "The image is private or access to it was denied."
+    elif "no such manifest" in detail or "manifest unknown" in detail:
+        message = "The Docker image or tag does not exist in the public registry."
+    else:
+        message = "The public Docker image could not be verified. Check its name, tag, and your network connection."
+
+    return False, message
 
 
 def email_is_verified(email: str) -> bool:
@@ -1142,10 +1190,7 @@ def application_step():
                 values["image"]
             )
 
-            if (
-                not image
-                or re.search(r"\s", image)
-            ):
+            if not image or not valid_docker_image_reference(image):
                 errors["image"] = (
                     "Paste a Docker pull command "
                     "such as 'docker pull httpd:2.4' "
@@ -1154,6 +1199,13 @@ def application_step():
                 )
 
             else:
+                available, availability_error = (
+                    public_image_is_available(image)
+                )
+
+                if not available:
+                    errors["image"] = availability_error
+
                 data["image"] = image
 
             integer_fields = [
@@ -1325,6 +1377,24 @@ def confirmation():
                 cluster,
             )
 
+    elif (
+        action == "deploy"
+        and application
+        and result.get("resources_applied")
+    ):
+        # Failed Pods must remain visible so the owner can inspect or
+        # delete the Kubernetes resources from the web interface.
+        save_owned_cluster(
+            user["email"],
+            cluster["cluster_name"],
+        )
+        save_owned_application(
+            user["email"],
+            application,
+            cluster,
+        )
+        result["failed_application_saved"] = True
+
     try:
         send_operation_email(
             user,
@@ -1354,10 +1424,38 @@ def confirmation():
             f"{email_error}"
         )
 
+    if result.get("failed_application_saved"):
+        delete_token = uuid.uuid4().hex
+        session["failed_delete_token"] = delete_token
+        result["failed_delete_token"] = delete_token
+
     return render_template(
         "result.html",
         result=result,
     )
+
+
+@app.post("/delete-failed-application")
+def delete_failed_application():
+    if not require_verified():
+        return redirect(url_for("identity"))
+
+    token = request.form.get("token", "")
+    expected = session.pop("failed_delete_token", None)
+    application = session.get("application")
+    cluster = session.get("cluster")
+
+    if not token or token != expected or not application or not cluster:
+        return render_template(
+            "result.html",
+            result={
+                "success": False,
+                "message": "The delete request is invalid or has already been used.",
+            },
+        )
+
+    session["action"] = "delete"
+    return redirect(url_for("confirmation"))
 
 
 @app.route("/logout")

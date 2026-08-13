@@ -1,4 +1,3 @@
-```jinja
 {% extends "base.html" %}
 
 {% block heading %}
@@ -22,32 +21,40 @@
     </div>
   {% endif %}
 
-  <form method="post">
-    <div class="form-group form-section">
-      <label for="application_key">Existing application</label>
+  {% if applications %}
+    <form method="post">
+      <div class="form-group form-section">
+        <label for="application_key">
+          Existing application
+        </label>
 
-      <select id="application_key" name="application_key" required>
-        <option value="" selected disabled>
-          Select an application
-        </option>
-
-        {% for application in applications %}
-          <option value="{{ application.key }}">
-            {{ application.app_name }} — {{ application.cluster_name }}
-            {% if application.namespace != "default" %}
-              — {{ application.namespace }}
-            {% endif %}
+        <select
+          id="application_key"
+          name="application_key"
+          required
+        >
+          <option value="" selected disabled>
+            Select an application
           </option>
-        {% endfor %}
-      </select>
-    </div>
 
-    <button class="deploy-button" type="submit">
-      Continue
-    </button>
-  </form>
+          {% for application in applications %}
+            <option value="{{ application.key }}">
+              {{ application.app_name }} — {{ application.cluster_name }}
+              {% if application.namespace != "default" %}
+                — {{ application.namespace }}
+              {% endif %}
+              — {{ application.status }}
+              ({{ application.ready_replicas }}/{{ application.replicas }} Ready)
+            </option>
+          {% endfor %}
+        </select>
+      </div>
 
-  {% if not applications and not discovery_error %}
+      <button class="deploy-button" type="submit">
+        Continue
+      </button>
+    </form>
+  {% elif not discovery_error %}
     <div class="warning-box">
       No applications were found in running Minikube clusters.
     </div>
@@ -57,4 +64,3 @@
     Back to actions
   </a>
 {% endblock %}
-```
