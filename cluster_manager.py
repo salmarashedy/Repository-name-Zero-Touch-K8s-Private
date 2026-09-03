@@ -769,6 +769,35 @@ def create_new_cluster(
     return "created"
 
 
+def delete_cluster_profile(
+    cluster_name: str,
+) -> str:
+    cluster_name = cluster_name.strip()
+
+    if not cluster_name:
+        raise ValueError(
+            "The cluster name cannot be empty."
+        )
+
+    output = run_cluster_command(
+        command=[
+            "minikube",
+            "delete",
+            "-p",
+            cluster_name,
+        ],
+        operation_description=(
+            f"Deleting damaged cluster '{cluster_name}'"
+        ),
+        timeout_seconds=600,
+    )
+
+    if output:
+        print(output)
+
+    return "deleted"
+
+
 def start_existing_cluster(
     cluster_name: str,
 ) -> None:

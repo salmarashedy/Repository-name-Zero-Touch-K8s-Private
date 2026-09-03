@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}Verify Administrator - Zero-Touch Kubernetes{% endblock %}
+
+{% block heading %}Verify administrator email{% endblock %}
+
+{% block intro %}
+    Enter the six-digit code sent to {{ email }}. The code expires after
+    2 minutes.
+{% endblock %}
+
+{% block content %}
+    {% if error %}
+        <div class="error-box form-section">
+            {{ error }}
+        </div>
+    {% endif %}
+
+    <form method="POST">
+        <div class="form-group form-section">
+            <label for="verification_code">Verification code</label>
+            <input
+                type="text"
+                id="verification_code"
+                name="verification_code"
+                inputmode="numeric"
+                pattern="[0-9]{6}"
+                maxlength="6"
+                autocomplete="one-time-code"
+                placeholder="000000"
+                required
+                autofocus
+            >
+            <small>
+                For security, you have a maximum of five attempts.
+            </small>
+        </div>
+
+        <button class="deploy-button" type="submit">
+            Verify code
+        </button>
+    </form>
+
+    <a class="back-link" href="{{ url_for('admin_login') }}">
+        Return to administrator login
+    </a>
+{% endblock %}

@@ -2,18 +2,55 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Zero-Touch Kubernetes{% endblock %}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>
+        {% block title %}
+            Zero-Touch Kubernetes
+        {% endblock %}
+    </title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
 </head>
+
 <body>
     <main class="page-container">
         <section class="deployment-card">
             <header class="card-header">
                 <div class="logo">&#9729;</div>
+
                 <div>
-                    <h1>{% block heading %}Zero-Touch Kubernetes{% endblock %}</h1>
-                    <p>{% block intro %}{% endblock %}</p>
+                    <h1>
+                        {% block heading %}
+                            Zero-Touch Kubernetes
+                        {% endblock %}
+                    </h1>
+
+                    <p>
+                        {% block intro %}{% endblock %}
+                    </p>
+
+                    {% if session.get("admin_authenticated") %}
+                        <p>
+                            <strong>Administrator:</strong>
+                            {{ session.get(
+                                "admin_email",
+                                "k8sadmin@gmail.com"
+                            ) }}
+                        </p>
+                    {% elif session.get("verified") %}
+                        <p>
+                            <strong>User:</strong>
+                            {{ session.get("user", {}).get("email", "") }}
+                        </p>
+                    {% endif %}
                 </div>
             </header>
 

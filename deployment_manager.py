@@ -12,6 +12,8 @@ from cluster_manager import (
     check_required_commands,
     ensure_cluster,
     cluster_is_running,
+    cluster_exists,
+    delete_cluster_profile,
     get_cluster_nodes,
 )
 
@@ -180,6 +182,79 @@ def list_application_choices(
                 "memory_request": _memory_to_mib(resources.get("memory", "")),
             })
     return sorted(applications, key=lambda item: (item["cluster_name"], item["app_name"]))
+
+
+def list_pod_choices() -> list[dict]:
+    """Return Pods from every running Minikube cluster for the admin UI."""
+    pods = []
+
+    for cluster in list_cluster_choices():
+        if not cluster["running"]:
+            continue
+
+        result = subprocess.run(
+            ["kubectl", "--context", cluster["name"], "get", "pods", "-A", "-o", "json"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            continue
+
+        try:
+            items = json.loads(result.stdout).get("items", [])
+        except json.JSONDecodeError:
+            continue
+
+        for item in items:
+            metadata = item.get("metadata", {})
+            status_data = item.get("status", {})
+            namespace = metadata.get("namespace", "default")
+            if namespace == "kube-system":
+                continue
+
+            pod_name = metadata.get("name", "")
+            if not pod_name:
+                continue
+
+            container_statuses = status_data.get("containerStatuses", [])
+            waiting_reasons = [
+                container.get("state", {}).get("waiting", {}).get("reason")
+                for container in container_statuses
+                if container.get("state", {}).get("waiting", {}).get("reason")
+            ]
+            pod_status = waiting_reasons[0] if waiting_reasons else status_data.get("phase", "Unknown")
+
+            pods.append({
+                "key": f'{cluster["name"]}|{namespace}|{pod_name}',
+                "cluster_name": cluster["name"],
+                "namespace": namespace,
+                "pod_name": pod_name,
+                "application": metadata.get("labels", {}).get("app", "—"),
+                "status": pod_status,
+                "node_name": status_data.get("nodeName", "—"),
+            })
+
+    return sorted(pods, key=lambda item: (item["cluster_name"], item["namespace"], item["pod_name"]))
+
+
+def delete_pod(cluster_name: str, namespace: str, pod_name: str) -> None:
+    """Delete one Pod. Its Deployment may create a replacement Pod."""
+    result = subprocess.run(
+        [
+            "kubectl", "--context", cluster_name, "-n", namespace,
+            "delete", "pod", pod_name, "--wait=false",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip() or result.stdout.strip() or "The Pod could not be deleted."
+        )
 
 from input_handler import (
     ask_app_name,
@@ -740,13 +815,18 @@ def execute_web_action(
     cluster_name = cluster["cluster_name"]
     node_count = cluster["node_count"]
     cluster_start_time = None
+    cluster_deleted = False
 
     try:
-        if action == "create":
+        if action in {"create", "recreate"}:
             cluster_start_time = time.perf_counter()
 
             check_required_commands()
             check_docker_running()
+
+            if action == "recreate":
+                delete_cluster_profile(cluster_name)
+                cluster_deleted = True
 
             cluster_result = ensure_cluster(
                 cluster_name,
@@ -761,7 +841,12 @@ def execute_web_action(
             return {
                 "success": True,
                 "message": (
-                    f"Cluster '{cluster_name}' is ready."
+                    f"Cluster '{cluster_name}' "
+                    + (
+                        "was recreated successfully."
+                        if action == "recreate"
+                        else "is ready."
+                    )
                 ),
                 "checks": [
                     cluster_result,
@@ -774,6 +859,7 @@ def execute_web_action(
                     cluster_duration,
                     2,
                 ),
+                "cluster_deleted": cluster_deleted,
             }
 
         if app_data is None:
@@ -929,13 +1015,34 @@ def execute_web_action(
         }
 
         if (
-            action == "create"
+            action in {"create", "recreate"}
             and cluster_start_time is not None
         ):
             result["cluster_duration"] = round(
                 time.perf_counter()
                 - cluster_start_time,
                 2,
+            )
+
+        if action == "create":
+            try:
+                result["repair_available"] = cluster_exists(
+                    cluster_name
+                )
+            except RuntimeError:
+                result["repair_available"] = False
+
+            if result["repair_available"]:
+                result["message"] = (
+                    f"Cluster '{cluster_name}' could not be started. "
+                    "You can recreate it, but its existing applications "
+                    "and Pods will be deleted."
+                )
+
+        if action == "recreate":
+            result["cluster_deleted"] = cluster_deleted
+            result["message"] = (
+                f"Cluster '{cluster_name}' could not be recreated."
             )
 
         return result

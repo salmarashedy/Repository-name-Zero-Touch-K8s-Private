@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}Select Role - Zero-Touch Kubernetes{% endblock %}
+
+{% block heading %}Welcome{% endblock %}
+
+{% block intro %}
+    Choose how you want to access the system.
+{% endblock %}
+
+{% block content %}
+    <form method="POST">
+        <div class="action-grid">
+            <button
+                class="action-card"
+                type="submit"
+                name="role"
+                value="user"
+            >
+                User
+            </button>
+
+            <button
+                class="action-card"
+                type="submit"
+                name="role"
+                value="admin"
+            >
+                Admin
+            </button>
+        </div>
+    </form>
+{% endblock %}

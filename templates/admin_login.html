@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}
+    Admin Login - Zero-Touch Kubernetes
+{% endblock %}
+
+{% block heading %}
+    Admin
+{% endblock %}
+
+{% block intro %}{% endblock %}
+
+{% block content %}
+    {% if error %}
+        <section class="form-section error-box">
+            {{ error }}
+        </section>
+    {% endif %}
+
+    <form method="POST">
+        <section class="form-section">
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="email">Email</label>
+
+                    <input
+                        type="email"
+                        id="email"
+                        name="email"
+                        value=""
+                        autocomplete="username"
+                        required
+                    >
+                </div>
+
+                {% if not first_setup %}
+                    <div class="form-group">
+                        <label for="password">Password</label>
+
+                        <input
+                            type="password"
+                            id="password"
+                            name="password"
+                            autocomplete="current-password"
+                            required
+                        >
+                    </div>
+                {% endif %}
+            </div>
+        </section>
+
+        <button class="deploy-button" type="submit">
+            {% if first_setup %}
+                Continue
+            {% else %}
+                Log in
+            {% endif %}
+        </button>
+
+        {% if not first_setup %}
+            <a
+                class="deploy-button back-button"
+                href="{{ url_for('admin_forgot_password') }}"
+            >
+                Forgot password?
+            </a>
+        {% endif %}
+
+        <a
+            class="deploy-button back-button"
+            href="{{ url_for('role_select') }}"
+        >
+            Back
+        </a>
+    </form>
+{% endblock %}

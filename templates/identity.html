@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 
-{% block heading %}Welcome{% endblock %}
+{% block heading %}User Verification{% endblock %}
 
 {% block intro %}
-    Verify your identity before managing Kubernetes resources.
+    Verify your identity before managing your Kubernetes resources.
 {% endblock %}
 
 {% block content %}
@@ -16,6 +16,7 @@
                 ] %}
                     <div class="form-group">
                         <label for="{{ key }}">{{ label }}</label>
+
                         <input
                             type="{{ type }}"
                             id="{{ key }}"
@@ -25,13 +26,24 @@
                         >
 
                         {% if errors.get(key) %}
-                            <small class="field-error">{{ errors[key] }}</small>
+                            <small class="field-error">
+                                {{ errors[key] }}
+                            </small>
                         {% endif %}
                     </div>
                 {% endfor %}
             </div>
         </section>
 
-        <button class="deploy-button" type="submit">Continue</button>
+        <button class="deploy-button" type="submit">
+            Continue
+        </button>
+
+        <a
+            class="deploy-button back-button"
+            href="{{ url_for('role_select') }}"
+        >
+            Back to role selection
+        </a>
     </form>
 {% endblock %}

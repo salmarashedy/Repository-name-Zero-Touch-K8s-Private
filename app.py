@@ -1,23 +1,28 @@
 import hashlib
+import copy
 import os
 import random
 import re
 import smtplib
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from email.message import EmailMessage
 from pathlib import Path
 
-from flask import Flask, redirect, render_template, request, session, url_for
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from deployment_manager import (
+    delete_pod,
     execute_web_action,
     list_application_choices,
     list_cluster_choices,
+    list_pod_choices,
 )
-from cluster_manager import cluster_exists
+from cluster_manager import cluster_exists, delete_cluster_profile
 
 
 app = Flask(__name__)
@@ -35,6 +40,11 @@ DATABASE_PATH = (
     / "verified_emails.db"
 )
 
+ADMIN_EMAIL = os.environ.get(
+    "ADMIN_EMAIL",
+    "k8sadmin@gmail.com",
+).strip().lower()
+
 VERIFICATION_EXPIRY_SECONDS = 120
 MAX_VERIFICATION_ATTEMPTS = 5
 MAX_CPU_MILLICORES = 1000
@@ -49,6 +59,11 @@ ACTIONS = {
     "inspect",
 }
 
+OPERATION_JOBS = {}
+OPERATION_JOBS_LOCK = threading.Lock()
+OPERATION_EXECUTION_LOCK = threading.Lock()
+OPERATION_JOB_TTL_SECONDS = 3600
+
 
 def initialize_database() -> None:
     with sqlite3.connect(DATABASE_PATH) as connection:
@@ -57,6 +72,43 @@ def initialize_database() -> None:
             CREATE TABLE IF NOT EXISTS verified_emails (
                 email TEXT PRIMARY KEY,
                 verified_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        existing_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(verified_emails)"
+            ).fetchall()
+        }
+
+        if "user_name" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE verified_emails ADD COLUMN user_name TEXT"
+            )
+
+        if "username_key" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE verified_emails ADD COLUMN username_key TEXT"
+            )
+
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                unique_verified_username
+            ON verified_emails (username_key)
+            WHERE username_key IS NOT NULL
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admin_accounts (
+                email TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -99,6 +151,10 @@ initialize_database()
 
 def normalize_email(value: str) -> str:
     return value.strip().lower()
+
+
+def normalize_username(value: str) -> str:
+    return " ".join(value.strip().split()).casefold()
 
 
 def valid_email(value: str) -> bool:
@@ -267,17 +323,198 @@ def email_is_verified(email: str) -> bool:
     return result is not None
 
 
-def save_verified_email(email: str) -> None:
+def get_identity_by_email(email: str):
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        return connection.execute(
+            """
+            SELECT email, user_name, username_key
+            FROM verified_emails
+            WHERE email = ?
+            """,
+            (normalize_email(email),),
+        ).fetchone()
+
+
+def get_identity_by_username(user_name: str):
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        return connection.execute(
+            """
+            SELECT email, user_name, username_key
+            FROM verified_emails
+            WHERE username_key = ?
+            """,
+            (normalize_username(user_name),),
+        ).fetchone()
+
+
+def save_verified_identity(email: str, user_name: str) -> None:
+    normalized_email = normalize_email(email)
+    clean_user_name = " ".join(user_name.strip().split())
+    username_key = normalize_username(clean_user_name)
+
     with sqlite3.connect(DATABASE_PATH) as connection:
         connection.execute(
             """
-            INSERT OR IGNORE INTO verified_emails (
-                email
+            INSERT INTO verified_emails (
+                email,
+                user_name,
+                username_key
             )
-            VALUES (?)
+            VALUES (?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                user_name = excluded.user_name,
+                username_key = excluded.username_key
             """,
-            (normalize_email(email),),
+            (
+                normalized_email,
+                clean_user_name,
+                username_key,
+            ),
         )
+
+
+def get_admin_password_hash() -> str | None:
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        row = connection.execute(
+            """
+            SELECT password_hash
+            FROM admin_accounts
+            WHERE email = ?
+            """,
+            (ADMIN_EMAIL,),
+        ).fetchone()
+
+    return row[0] if row else None
+
+
+def admin_account_exists() -> bool:
+    return get_admin_password_hash() is not None
+
+
+def save_admin_password(password: str) -> None:
+    password_hash = generate_password_hash(password)
+
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.execute(
+            """
+            INSERT INTO admin_accounts (
+                email,
+                password_hash
+            )
+            VALUES (?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                password_hash = excluded.password_hash,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (ADMIN_EMAIL, password_hash),
+        )
+
+
+def admin_password_is_correct(password: str) -> bool:
+    password_hash = get_admin_password_hash()
+
+    return bool(
+        password_hash
+        and check_password_hash(
+            password_hash,
+            password,
+        )
+    )
+
+
+def registered_users() -> list[dict]:
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT
+                verified_emails.email,
+                verified_emails.verified_at,
+                COUNT(DISTINCT owned_clusters.cluster_name)
+                    AS cluster_count,
+                COUNT(DISTINCT
+                    owned_applications.cluster_name || '|' ||
+                    owned_applications.namespace || '|' ||
+                    owned_applications.app_name
+                ) AS application_count
+            FROM verified_emails
+            LEFT JOIN owned_clusters
+                ON owned_clusters.email = verified_emails.email
+            LEFT JOIN owned_applications
+                ON owned_applications.email = verified_emails.email
+            GROUP BY
+                verified_emails.email,
+                verified_emails.verified_at
+            ORDER BY verified_emails.email
+            """
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def all_cluster_owners() -> dict[str, str]:
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        rows = connection.execute(
+            """
+            SELECT cluster_name, email
+            FROM owned_clusters
+            """
+        ).fetchall()
+
+    return {
+        cluster_name: email
+        for cluster_name, email in rows
+    }
+
+
+def all_application_owners() -> dict[str, str]:
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                cluster_name,
+                namespace,
+                app_name,
+                email
+            FROM owned_applications
+            """
+        ).fetchall()
+
+    return {
+        f"{cluster}|{namespace}|{application}": email
+        for cluster, namespace, application, email in rows
+    }
+
+
+def remove_all_cluster_records(cluster_name: str) -> None:
+    """Remove ownership records after an administrator deletes a cluster."""
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.execute(
+            "DELETE FROM owned_applications WHERE cluster_name = ?",
+            (cluster_name,),
+        )
+        connection.execute(
+            "DELETE FROM owned_clusters WHERE cluster_name = ?",
+            (cluster_name,),
+        )
+
+
+def delete_cluster_after_response(cluster_name: str) -> None:
+    """Delete a cluster after the browser has received the dashboard response."""
+    time.sleep(4)
+
+    with OPERATION_EXECUTION_LOCK:
+        try:
+            delete_cluster_profile(cluster_name)
+            remove_all_cluster_records(cluster_name)
+            print(f"Administrator deleted cluster '{cluster_name}'.")
+        except RuntimeError as error:
+            print(
+                f"Administrator cluster deletion failed for "
+                f"'{cluster_name}': {error}"
+            )
 
 
 def owned_cluster_names(email: str) -> set[str]:
@@ -452,6 +689,52 @@ def send_verification_email(
         smtp.send_message(message)
 
 
+def prepare_user_friendly_result(
+    result: dict,
+    action: str,
+    cluster: dict,
+    user: dict,
+) -> dict:
+    """Hide infrastructure details while retaining them for administrators."""
+    if result.get("success", False):
+        return result
+
+    technical_message = str(
+        result.get("message", "Unknown operation error.")
+    )
+    cluster_name = cluster.get("cluster_name", "the requested cluster")
+
+    app.logger.error(
+        "Kubernetes operation failed | action=%s | cluster=%s | owner=%s | error=%s",
+        action,
+        cluster_name,
+        user.get("email", "unknown"),
+        technical_message,
+    )
+
+    result["technical_message"] = technical_message
+
+    start_failure_markers = (
+        "starting cluster",
+        "starthost failed",
+        "guest_provision",
+        "docker container exited",
+        "unable to inspect a not running container",
+        "too many open files",
+    )
+    normalized_message = technical_message.lower()
+
+    if any(marker in normalized_message for marker in start_failure_markers):
+        result["error_title"] = "Cluster could not be started"
+        result.pop("details", None)
+        result["message"] = (
+            "The cluster could not be started. Please contact the "
+            "administrator for assistance."
+        )
+
+    return result
+
+
 def send_operation_email(
     user: dict,
     action: str,
@@ -579,7 +862,64 @@ def field_error(
     )
 
 
+def create_verification_code() -> str:
+    return (
+        f"{random.SystemRandom().randint(0, 999999):06d}"
+    )
+
+
+def start_admin_verification(purpose: str) -> None:
+    code = create_verification_code()
+
+    send_verification_email(
+        ADMIN_EMAIL,
+        "Administrator",
+        code,
+    )
+
+    session["admin_verification"] = {
+        "code_hash": hash_code(code),
+        "expires_at": (
+            time.time()
+            + VERIFICATION_EXPIRY_SECONDS
+        ),
+        "attempts": 0,
+        "purpose": purpose,
+    }
+
+
+def require_admin() -> bool:
+    return bool(
+        session.get("role") == "admin"
+        and session.get("admin_authenticated")
+        and session.get("admin_email")
+        == ADMIN_EMAIL
+    )
+
+
+def dashboard_endpoint() -> str:
+    return (
+        "admin_dashboard"
+        if require_admin()
+        else "dashboard"
+    )
+
+
 @app.route("/", methods=["GET", "POST"])
+def role_select():
+    if request.method == "POST":
+        role = request.form.get("role", "")
+
+        if role == "user":
+            return redirect(url_for("identity"))
+
+        if role == "admin":
+            return redirect(url_for("admin_login"))
+
+    return render_template("role_select.html")
+
+
+@app.route("/user", methods=["GET", "POST"])
 def identity():
     values = {
         "user_name": "",
@@ -607,6 +947,10 @@ def identity():
         values["email"]
     )
 
+    values["user_name"] = " ".join(
+        values["user_name"].split()
+    )
+
     if not values["user_name"]:
         errors["user_name"] = (
             "Name is required."
@@ -624,22 +968,74 @@ def identity():
             values,
         )
 
+    identity_for_email = get_identity_by_email(email)
+    identity_for_username = get_identity_by_username(
+        values["user_name"]
+    )
+
+    email_has_another_username = (
+        identity_for_email
+        and identity_for_email["username_key"]
+        and identity_for_email["username_key"]
+        != normalize_username(values["user_name"])
+    )
+
+    username_taken = (
+        identity_for_username
+        and identity_for_username["email"] != email
+    )
+
+    if email_has_another_username:
+        errors["email"] = (
+            "This email is already registered with another username."
+        )
+
+    if username_taken:
+        errors["user_name"] = (
+            "This username is already taken. "
+            "Please choose another one."
+        )
+
+    if errors:
+        return field_error(
+            "identity.html",
+            errors,
+            values,
+        )
+
     session.clear()
 
     session["user"] = {
         "user_name": values["user_name"],
         "email": email,
     }
+    session["role"] = "user"
 
-    if email_is_verified(email):
+    if identity_for_email:
+        if not identity_for_email["username_key"]:
+            try:
+                save_verified_identity(
+                    email,
+                    values["user_name"],
+                )
+            except sqlite3.IntegrityError:
+                errors["user_name"] = (
+                    "This username is already taken. "
+                    "Please choose another one."
+                )
+
+                return field_error(
+                    "identity.html",
+                    errors,
+                    values,
+                )
+
         session["verified"] = True
         return redirect(
             url_for("dashboard")
         )
 
-    code = (
-        f"{random.SystemRandom().randint(0, 999999):06d}"
-    )
+    code = create_verification_code()
 
     try:
         send_verification_email(
@@ -672,6 +1068,241 @@ def identity():
 
     return redirect(
         url_for("verify_email")
+    )
+
+
+@app.route(
+    "/admin/login",
+    methods=["GET", "POST"],
+)
+def admin_login():
+    if require_admin():
+        return redirect(url_for("admin_dashboard"))
+
+    values = {"email": ADMIN_EMAIL}
+    error = None
+
+    if request.method == "POST":
+        email = normalize_email(
+            request.form.get("email", "")
+        )
+        password = request.form.get("password", "")
+        values["email"] = email
+
+        if email != ADMIN_EMAIL:
+            error = "This email is not registered as the administrator."
+
+        elif not admin_account_exists():
+            session.clear()
+            session["role"] = "admin"
+            session["admin_email"] = ADMIN_EMAIL
+
+            try:
+                start_admin_verification("first_setup")
+            except (
+                OSError,
+                RuntimeError,
+                smtplib.SMTPException,
+            ) as send_error:
+                error = str(send_error)
+            else:
+                return redirect(
+                    url_for("admin_verify")
+                )
+
+        elif not password:
+            error = "Enter the administrator password."
+
+        elif not admin_password_is_correct(password):
+            error = "The administrator email or password is incorrect."
+
+        else:
+            session.clear()
+            session["role"] = "admin"
+            session["admin_email"] = ADMIN_EMAIL
+            session["admin_authenticated"] = True
+            session["user"] = {
+                "user_name": "Administrator",
+                "email": ADMIN_EMAIL,
+            }
+
+            return redirect(
+                url_for("admin_dashboard")
+            )
+
+    return render_template(
+        "admin_login.html",
+        values=values,
+        error=error,
+        first_setup=not admin_account_exists(),
+    )
+
+
+@app.route(
+    "/admin/forgot-password",
+    methods=["GET", "POST"],
+)
+def admin_forgot_password():
+    error = None
+    values = {"email": ADMIN_EMAIL}
+
+    if request.method == "POST":
+        email = normalize_email(
+            request.form.get("email", "")
+        )
+        values["email"] = email
+
+        if email != ADMIN_EMAIL:
+            error = "This email is not registered as the administrator."
+
+        elif not admin_account_exists():
+            error = "The administrator account has not been set up yet."
+
+        else:
+            session.clear()
+            session["role"] = "admin"
+            session["admin_email"] = ADMIN_EMAIL
+
+            try:
+                start_admin_verification("password_reset")
+            except (
+                OSError,
+                RuntimeError,
+                smtplib.SMTPException,
+            ) as send_error:
+                error = str(send_error)
+            else:
+                return redirect(
+                    url_for("admin_verify")
+                )
+
+    return render_template(
+        "admin_forgot_password.html",
+        values=values,
+        error=error,
+    )
+
+
+@app.route(
+    "/admin/verify",
+    methods=["GET", "POST"],
+)
+def admin_verify():
+    verification = session.get(
+        "admin_verification"
+    )
+
+    if (
+        not verification
+        or session.get("admin_email")
+        != ADMIN_EMAIL
+    ):
+        return redirect(url_for("admin_login"))
+
+    error = None
+
+    if request.method == "POST":
+        submitted_code = request.form.get(
+            "verification_code",
+            "",
+        ).strip()
+
+        if time.time() > verification["expires_at"]:
+            session.pop("admin_verification", None)
+            error = (
+                "The code expired after 2 minutes. "
+                "Return and request a new code."
+            )
+
+        elif hash_code(submitted_code) == verification["code_hash"]:
+            purpose = verification["purpose"]
+            session.pop("admin_verification", None)
+            session["admin_password_setup_authorized"] = True
+            session["admin_password_setup_purpose"] = purpose
+
+            return redirect(
+                url_for("admin_set_password")
+            )
+
+        else:
+            verification["attempts"] += 1
+
+            if verification["attempts"] >= MAX_VERIFICATION_ATTEMPTS:
+                session.pop("admin_verification", None)
+                error = (
+                    "Five incorrect attempts were made. "
+                    "Request a new code."
+                )
+            else:
+                session["admin_verification"] = verification
+                attempts_left = (
+                    MAX_VERIFICATION_ATTEMPTS
+                    - verification["attempts"]
+                )
+                error = (
+                    "Incorrect code. "
+                    f"{attempts_left} attempts remaining."
+                )
+
+    return render_template(
+        "admin_verify.html",
+        email=ADMIN_EMAIL,
+        error=error,
+    )
+
+
+@app.route(
+    "/admin/set-password",
+    methods=["GET", "POST"],
+)
+def admin_set_password():
+    if not session.get("admin_password_setup_authorized"):
+        return redirect(url_for("admin_login"))
+
+    error = None
+    purpose = session.get(
+        "admin_password_setup_purpose",
+        "first_setup",
+    )
+
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        confirmation = request.form.get(
+            "confirm_password",
+            "",
+        )
+
+        if len(password) < 8:
+            error = "The password must contain at least 8 characters."
+        elif password != confirmation:
+            error = "The two passwords do not match."
+        else:
+            save_admin_password(password)
+
+            session.pop(
+                "admin_password_setup_authorized",
+                None,
+            )
+            session.pop(
+                "admin_password_setup_purpose",
+                None,
+            )
+            session["role"] = "admin"
+            session["admin_email"] = ADMIN_EMAIL
+            session["admin_authenticated"] = True
+            session["user"] = {
+                "user_name": "Administrator",
+                "email": ADMIN_EMAIL,
+            }
+
+            return redirect(
+                url_for("admin_dashboard")
+            )
+
+    return render_template(
+        "admin_set_password.html",
+        error=error,
+        purpose=purpose,
     )
 
 
@@ -717,9 +1348,24 @@ def verify_email():
             )
             == verification["code_hash"]
         ):
-            save_verified_email(
-                user["email"]
-            )
+            try:
+                save_verified_identity(
+                    user["email"],
+                    user["user_name"],
+                )
+            except sqlite3.IntegrityError:
+                session.pop(
+                    "verification",
+                    None,
+                )
+
+                return render_template(
+                    "verify.html",
+                    error=(
+                        "This username is already taken. "
+                        "Please choose another one."
+                    ),
+                )
 
             session.pop(
                 "verification",
@@ -776,6 +1422,166 @@ def require_verified():
     return (
         session.get("verified")
         and session.get("user")
+        and session.get("role") == "user"
+    )
+
+
+@app.route(
+    "/admin/dashboard",
+    methods=["GET", "POST"],
+)
+def admin_dashboard():
+    if not require_admin():
+        return redirect(url_for("admin_login"))
+
+    discovery_error = None
+    notice = session.pop("admin_notice", None)
+    error = session.pop("admin_error", None)
+
+    if not session.get("admin_action_token"):
+        session["admin_action_token"] = uuid.uuid4().hex
+
+    admin_action_token = session["admin_action_token"]
+
+    try:
+        clusters = list_cluster_choices()
+        applications = list_application_choices()
+        pods = list_pod_choices()
+    except RuntimeError as discovery_exception:
+        clusters = []
+        applications = []
+        pods = []
+        discovery_error = str(discovery_exception)
+
+    cluster_owners = all_cluster_owners()
+    application_owners = all_application_owners()
+
+    clusters = [
+        {
+            **cluster,
+            "owner": cluster_owners.get(
+                cluster["name"],
+                "Unassigned",
+            ),
+        }
+        for cluster in clusters
+    ]
+
+    applications = [
+        {
+            **application,
+            "owner": application_owners.get(
+                application["key"],
+                "Unassigned",
+            ),
+        }
+        for application in applications
+    ]
+
+    if request.method == "POST":
+        if request.form.get("token", "") != admin_action_token:
+            session["admin_error"] = "The request is invalid. Please try again."
+            return redirect(url_for("admin_dashboard"))
+
+        admin_action = request.form.get(
+            "admin_action",
+            "inspect_application",
+        )
+
+        if admin_action == "delete_cluster":
+            selected_cluster = request.form.get("cluster_name", "")
+            cluster_match = next(
+                (cluster for cluster in clusters if cluster["name"] == selected_cluster),
+                None,
+            )
+
+            if cluster_match is None:
+                session["admin_error"] = "The selected cluster was not found."
+            else:
+                worker = threading.Thread(
+                    target=delete_cluster_after_response,
+                    args=(selected_cluster,),
+                    daemon=True,
+                )
+                worker.start()
+                session["admin_notice"] = (
+                    f"Cluster '{selected_cluster}' is being deleted. "
+                    "Wait a few seconds, then refresh the dashboard."
+                )
+
+            return redirect(url_for("admin_dashboard"))
+
+        if admin_action == "delete_pod":
+            selected_pod = request.form.get("pod_key", "")
+            pod_match = next(
+                (pod for pod in pods if pod["key"] == selected_pod),
+                None,
+            )
+
+            if pod_match is None:
+                session["admin_error"] = "The selected Pod was not found."
+            else:
+                try:
+                    delete_pod(
+                        pod_match["cluster_name"],
+                        pod_match["namespace"],
+                        pod_match["pod_name"],
+                    )
+                    session["admin_notice"] = (
+                        f"Pod '{pod_match['pod_name']}' was deleted. "
+                        "Kubernetes may create a replacement if it belongs to a Deployment."
+                    )
+                except RuntimeError as delete_error:
+                    session["admin_error"] = str(delete_error)
+
+            return redirect(url_for("admin_dashboard"))
+
+        selected = request.form.get("application_key", "")
+
+        match = next(
+            (
+                application
+                for application in applications
+                if application["key"] == selected
+            ),
+            None,
+        )
+
+        if match is None:
+            error = "Choose an application to inspect."
+        else:
+            session["action"] = "inspect"
+            session["cluster"] = {
+                "cluster_name": match["cluster_name"],
+                "node_count": match["node_count"],
+                "original_name": match["cluster_name"],
+            }
+            session["application"] = {
+                key: match[key]
+                for key in (
+                    "app_name",
+                    "namespace",
+                    "image",
+                    "replicas",
+                    "port",
+                    "cpu_request",
+                    "memory_request",
+                )
+            }
+
+            return redirect(url_for("confirmation"))
+
+    return render_template(
+        "admin_dashboard.html",
+        admin_email=ADMIN_EMAIL,
+        users=registered_users(),
+        clusters=clusters,
+        applications=applications,
+        pods=pods,
+        error=error,
+        notice=notice,
+        discovery_error=discovery_error,
+        admin_action_token=admin_action_token,
     )
 
 
@@ -903,10 +1709,8 @@ def cluster_step():
                 != "1"
             ):
                 errors["cluster_name"] = (
-                    "This existing cluster is not "
-                    "assigned to your account. Ask the "
-                    "administrator to enable a "
-                    "controlled legacy claim."
+                    "A cluster with this name already exists. "
+                    "Please choose another cluster name."
                 )
 
         if not errors:
@@ -1277,18 +2081,181 @@ def application_step():
     )
 
 
+def clean_expired_operation_jobs() -> None:
+    cutoff = time.time() - OPERATION_JOB_TTL_SECONDS
+
+    with OPERATION_JOBS_LOCK:
+        expired_ids = [
+            job_id
+            for job_id, job in OPERATION_JOBS.items()
+            if job["created_at"] < cutoff
+        ]
+
+        for job_id in expired_ids:
+            OPERATION_JOBS.pop(job_id, None)
+
+
+def operation_job_for_current_user(job_id: str):
+    user = session.get("user")
+
+    if not user:
+        return None
+
+    with OPERATION_JOBS_LOCK:
+        job = OPERATION_JOBS.get(job_id)
+
+        if not job or job["owner_email"] != user.get("email"):
+            return None
+
+        return job
+
+
+def finish_operation_job(
+    job_id: str,
+    action: str,
+    cluster: dict,
+    application: dict | None,
+    user: dict,
+) -> None:
+    # Give the progress page time to reach the browser before Minikube
+    # changes Docker's virtual networking.
+    time.sleep(1.5)
+
+    with OPERATION_EXECUTION_LOCK:
+        with OPERATION_JOBS_LOCK:
+            job = OPERATION_JOBS.get(job_id)
+
+            if not job:
+                return
+
+            job["status"] = "running"
+
+        try:
+            result = execute_web_action(
+                action,
+                cluster,
+                application,
+            )
+
+            result = prepare_user_friendly_result(
+                result,
+                action,
+                cluster,
+                user,
+            )
+
+            if result.get("success"):
+                if action == "create":
+                    save_owned_cluster(
+                        user["email"],
+                        cluster["cluster_name"],
+                    )
+
+                elif action == "deploy" and application:
+                    save_owned_cluster(
+                        user["email"],
+                        cluster["cluster_name"],
+                    )
+                    save_owned_application(
+                        user["email"],
+                        application,
+                        cluster,
+                    )
+
+                elif action == "delete" and application:
+                    remove_owned_application(
+                        user["email"],
+                        application,
+                        cluster,
+                    )
+
+            elif (
+                action == "deploy"
+                and application
+                and result.get("resources_applied")
+            ):
+                save_owned_cluster(
+                    user["email"],
+                    cluster["cluster_name"],
+                )
+                save_owned_application(
+                    user["email"],
+                    application,
+                    cluster,
+                )
+                result["failed_application_saved"] = True
+
+            try:
+                send_operation_email(
+                    user,
+                    action,
+                    cluster,
+                    application,
+                    result,
+                )
+                result["notification_sent"] = True
+                result["notification_message"] = (
+                    "An operation notification was sent to "
+                    f"{user['email']}."
+                )
+
+            except (
+                OSError,
+                RuntimeError,
+                smtplib.SMTPException,
+            ) as email_error:
+                result["notification_sent"] = False
+                result["notification_message"] = (
+                    "The operation finished, but its email "
+                    "notification could not be sent: "
+                    f"{email_error}"
+                )
+
+        except Exception as error:
+            app.logger.exception(
+                "Unexpected Kubernetes operation failure | action=%s | cluster=%s | owner=%s",
+                action,
+                cluster.get("cluster_name", "unknown"),
+                user.get("email", "unknown"),
+            )
+            result = {
+                "success": False,
+                "error_title": "Operation could not be completed",
+                "message": (
+                    "The operation could not be completed because of an "
+                    "unexpected system problem. Please try again later or "
+                    "contact the administrator."
+                ),
+                "technical_message": str(error),
+            }
+
+        with OPERATION_JOBS_LOCK:
+            job = OPERATION_JOBS.get(job_id)
+
+            if job:
+                job["status"] = "completed"
+                job["result"] = result
+                job["completed_at"] = time.time()
+
+
 @app.route(
     "/confirmation",
     methods=["GET", "POST"],
 )
 def confirmation():
     if (
-        not require_verified()
+        not (
+            require_verified()
+            or require_admin()
+        )
         or not session.get("cluster")
     ):
         return redirect(
-            url_for("dashboard")
+            url_for(dashboard_endpoint())
         )
+
+    if require_admin() and session.get("action") != "inspect":
+        return redirect(url_for("admin_dashboard"))
 
     if (
         session["action"] != "create"
@@ -1333,100 +2300,128 @@ def confirmation():
         )
 
     action = session["action"]
-    cluster = session["cluster"]
-    application = session.get(
-        "application"
-    )
-    user = session["user"]
+    cluster = copy.deepcopy(session["cluster"])
+    application = copy.deepcopy(session.get("application"))
+    user = copy.deepcopy(session["user"])
+    job_id = uuid.uuid4().hex
 
-    result = execute_web_action(
-        action,
-        cluster,
-        application,
-    )
+    clean_expired_operation_jobs()
 
-    if result.get("success"):
-        if action == "create":
-            save_owned_cluster(
-                user["email"],
-                cluster["cluster_name"],
-            )
+    with OPERATION_JOBS_LOCK:
+        OPERATION_JOBS[job_id] = {
+            "status": "pending",
+            "created_at": time.time(),
+            "owner_email": user["email"],
+            "action": action,
+            "cluster": cluster,
+            "application": application,
+            "user": user,
+            "result": None,
+            "started": False,
+        }
 
-        elif (
-            action == "deploy"
-            and application
-        ):
-            save_owned_cluster(
-                user["email"],
-                cluster["cluster_name"],
-            )
-
-            save_owned_application(
-                user["email"],
-                application,
-                cluster,
-            )
-
-        elif (
-            action == "delete"
-            and application
-        ):
-            remove_owned_application(
-                user["email"],
-                application,
-                cluster,
-            )
-
-    elif (
-        action == "deploy"
-        and application
-        and result.get("resources_applied")
-    ):
-        # Failed Pods must remain visible so the owner can inspect or
-        # delete the Kubernetes resources from the web interface.
-        save_owned_cluster(
-            user["email"],
-            cluster["cluster_name"],
+    return redirect(
+        url_for(
+            "operation_progress",
+            job_id=job_id,
         )
-        save_owned_application(
-            user["email"],
-            application,
-            cluster,
-        )
-        result["failed_application_saved"] = True
+    )
 
-    try:
-        send_operation_email(
-            user,
+
+@app.get("/operation/<job_id>")
+def operation_progress(job_id):
+    job = operation_job_for_current_user(job_id)
+
+    if not job:
+        return redirect(url_for(dashboard_endpoint()))
+
+    return render_template(
+        "operation_progress.html",
+        job_id=job_id,
+        action=job["action"],
+        cluster=job["cluster"],
+    )
+
+
+@app.post("/operation/<job_id>/start")
+def start_operation_job(job_id):
+    job = operation_job_for_current_user(job_id)
+
+    if not job:
+        return jsonify({"error": "Operation not found."}), 404
+
+    with OPERATION_JOBS_LOCK:
+        job = OPERATION_JOBS.get(job_id)
+
+        if not job:
+            return jsonify({"error": "Operation not found."}), 404
+
+        if job["started"]:
+            return jsonify({"status": job["status"]})
+
+        job["started"] = True
+        job["status"] = "queued"
+        action = job["action"]
+        cluster = copy.deepcopy(job["cluster"])
+        application = copy.deepcopy(job["application"])
+        user = copy.deepcopy(job["user"])
+
+    worker = threading.Thread(
+        target=finish_operation_job,
+        args=(
+            job_id,
             action,
             cluster,
             application,
-            result,
+            user,
+        ),
+        daemon=True,
+    )
+    worker.start()
+
+    return jsonify({"status": "queued"}), 202
+
+
+@app.get("/operation/<job_id>/status")
+def operation_status(job_id):
+    job = operation_job_for_current_user(job_id)
+
+    if not job:
+        return jsonify({"error": "Operation not found."}), 404
+
+    response = {"status": job["status"]}
+
+    if job["status"] == "completed":
+        response["result_url"] = url_for(
+            "operation_result",
+            job_id=job_id,
         )
 
-        result["notification_sent"] = True
+    return jsonify(response)
 
-        result["notification_message"] = (
-            "An operation notification was sent to "
-            f"{user['email']}."
+
+@app.get("/operation/<job_id>/result")
+def operation_result(job_id):
+    job = operation_job_for_current_user(job_id)
+
+    if not job:
+        return redirect(url_for(dashboard_endpoint()))
+
+    if job["status"] != "completed":
+        return redirect(
+            url_for(
+                "operation_progress",
+                job_id=job_id,
+            )
         )
 
-    except (
-        OSError,
-        RuntimeError,
-        smtplib.SMTPException,
-    ) as email_error:
-        result["notification_sent"] = False
-
-        result["notification_message"] = (
-            "The operation finished, but its email "
-            "notification could not be sent: "
-            f"{email_error}"
-        )
+    result = copy.deepcopy(job["result"])
 
     if result.get("failed_application_saved"):
         delete_token = uuid.uuid4().hex
         session["failed_delete_token"] = delete_token
+        session["cluster"] = copy.deepcopy(job["cluster"])
+        session["application"] = copy.deepcopy(job["application"])
         result["failed_delete_token"] = delete_token
 
     return render_template(
@@ -1463,7 +2458,7 @@ def logout():
     session.clear()
 
     return redirect(
-        url_for("identity")
+        url_for("role_select")
     )
 
 

@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block title %}
+    Operation in Progress - Zero-Touch Kubernetes
+{% endblock %}
+
+{% block heading %}
+    Operation in progress
+{% endblock %}
+
+{% block intro %}
+    Please keep this page open.
+{% endblock %}
+
+{% block content %}
+    <section
+        id="operation-data"
+        class="form-section result-box"
+        data-start-url="{{ url_for(
+            'start_operation_job',
+            job_id=job_id
+        ) }}"
+        data-status-url="{{ url_for(
+            'operation_status',
+            job_id=job_id
+        ) }}"
+    >
+        <p>
+            <strong>Operation:</strong>
+            {{ action|capitalize }}
+        </p>
+
+        <p>
+            <strong>Cluster:</strong>
+            {{ cluster.cluster_name }}
+        </p>
+
+        <p id="operation-status">
+            Preparing the operation...
+        </p>
+    </section>
+
+    <script>
+        const operationData =
+            document.getElementById("operation-data");
+
+        const statusText =
+            document.getElementById("operation-status");
+
+        const startUrl =
+            operationData.dataset.startUrl;
+
+        const statusUrl =
+            operationData.dataset.statusUrl;
+
+        function showStatus(status) {
+            if (status === "pending") {
+                statusText.textContent =
+                    "Preparing the operation...";
+            } else if (status === "queued") {
+                statusText.textContent =
+                    "The operation is waiting to start...";
+            } else if (status === "running") {
+                statusText.textContent =
+                    "The operation is running...";
+            }
+        }
+
+        async function checkOperation() {
+            try {
+                await fetch(startUrl, {
+                    method: "POST",
+                    cache: "no-store"
+                });
+            } catch (error) {
+                statusText.textContent =
+                    "Reconnecting...";
+            }
+
+            try {
+                const response = await fetch(statusUrl, {
+                    cache: "no-store"
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+
+                    if (
+                        data.status === "completed"
+                        && data.result_url
+                    ) {
+                        window.location.replace(
+                            data.result_url
+                        );
+
+                        return;
+                    }
+
+                    showStatus(data.status);
+                }
+            } catch (error) {
+                statusText.textContent =
+                    "Reconnecting...";
+            }
+
+            window.setTimeout(
+                checkOperation,
+                2000
+            );
+        }
+
+        checkOperation();
+    </script>
+{% endblock %}

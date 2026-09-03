@@ -5,7 +5,7 @@
     {% if result.success %}
         Operation completed
     {% else %}
-        Operation failed
+        {{ result.get("error_title", "Operation failed") }}
     {% endif %}
 {% endblock %}
 
@@ -72,6 +72,40 @@
     {% endif %}
 
 
+    {% if result.get("repair_cluster_token") %}
+        <section class="form-section warning-box">
+            <p>
+                <strong>This cluster needs to be recreated.</strong>
+            </p>
+
+            <p>
+                Recreating it will permanently delete its existing
+                applications, Pods, Deployments, Services, and other
+                Kubernetes resources.
+            </p>
+        </section>
+
+        <form
+            method="post"
+            action="{{ url_for('recreate_failed_cluster') }}"
+            onsubmit="this.querySelector('button').disabled=true"
+        >
+            <input
+                type="hidden"
+                name="token"
+                value="{{ result.repair_cluster_token }}"
+            >
+
+            <button
+                class="deploy-button danger-button"
+                type="submit"
+            >
+                Recreate cluster
+            </button>
+        </form>
+    {% endif %}
+
+
     {% if result.get("notification_message") %}
         <p
             class="
@@ -90,7 +124,9 @@
     {% if result.get("failed_delete_token") %}
         <section class="form-section warning-box">
             <p>
-                <strong>The failed Kubernetes resources still exist.</strong>
+                <strong>
+                    The failed Kubernetes resources still exist.
+                </strong>
             </p>
 
             <p>
@@ -122,8 +158,12 @@
 
     <a
         class="deploy-button back-button"
-        href="{{ url_for('dashboard') }}"
+        href="{% if session.get('admin_authenticated') %}{{ url_for('admin_dashboard') }}{% else %}{{ url_for('dashboard') }}{% endif %}"
     >
-        Return to dashboard
+        {% if session.get("admin_authenticated") %}
+            Return to admin dashboard
+        {% else %}
+            Return to dashboard
+        {% endif %}
     </a>
 {% endblock %}
