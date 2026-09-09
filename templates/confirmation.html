@@ -9,6 +9,7 @@
 {% endblock %}
 
 {% block content %}
+
 <section class="form-section result-box">
     <p>
         <strong>Cluster:</strong>
@@ -26,19 +27,26 @@
             {{ app_data.app_name }}
         </p>
 
-        {% if app_data.image %}
+        {% if app_data.source_filename %}
             <p>
-                <strong>Docker image:</strong>
-                {{ app_data.image }}
+                <strong>Source-code ZIP:</strong>
+                {{ app_data.source_filename }}
             </p>
+        {% elif action == 'update' %}
+            <p>
+                <strong>Source code:</strong>
+                Keep the currently deployed application
+            </p>
+        {% endif %}
 
+        {% if action in ['deploy', 'update'] %}
             <p>
                 <strong>Replicas:</strong>
                 {{ app_data.replicas }}
             </p>
 
             <p>
-                <strong>Container port:</strong>
+                <strong>Application port:</strong>
                 {{ app_data.port }}
             </p>
 
@@ -48,8 +56,18 @@
             </p>
 
             <p>
+                <strong>CPU limit:</strong>
+                1000 millicores
+            </p>
+
+            <p>
                 <strong>Memory request:</strong>
                 {{ app_data.memory_request }} MiB
+            </p>
+
+            <p>
+                <strong>Memory limit:</strong>
+                1024 MiB
             </p>
         {% endif %}
     {% endif %}
@@ -72,7 +90,7 @@
         value="{{ token }}"
     >
 
-    <button class="deploy-button">
+    <button class="deploy-button" type="submit">
         Start operation
     </button>
 </form>
@@ -83,4 +101,5 @@
 >
     Cancel
 </a>
+
 {% endblock %}

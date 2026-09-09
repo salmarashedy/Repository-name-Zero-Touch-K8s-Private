@@ -3,12 +3,15 @@ import copy
 import os
 import random
 import re
+import shutil
 import smtplib
 import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -26,6 +29,8 @@ from cluster_manager import cluster_exists, delete_cluster_profile
 
 
 app = Flask(__name__)
+
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 secret = os.environ.get("FLASK_SECRET_KEY")
 
@@ -63,6 +68,54 @@ OPERATION_JOBS = {}
 OPERATION_JOBS_LOCK = threading.Lock()
 OPERATION_EXECUTION_LOCK = threading.Lock()
 OPERATION_JOB_TTL_SECONDS = 3600
+
+
+def remove_temporary_source(application: dict | None) -> None:
+    if not application:
+        return
+
+    source_zip_path = application.get("source_zip_path")
+
+    if not source_zip_path:
+        return
+
+    upload_directory = Path(source_zip_path).resolve().parent
+    temporary_root = Path(tempfile.gettempdir()).resolve()
+
+    try:
+        upload_directory.relative_to(temporary_root)
+    except ValueError:
+        return
+
+    if upload_directory.name.startswith("zero-touch-upload-"):
+        shutil.rmtree(upload_directory, ignore_errors=True)
+
+
+def save_temporary_source(uploaded_file) -> tuple[str, str]:
+    filename = str(uploaded_file.filename or "").strip()
+
+    if not filename:
+        raise ValueError("Select a source-code ZIP file.")
+
+    if not filename.lower().endswith(".zip"):
+        raise ValueError("The source code must be uploaded as a ZIP file.")
+
+    upload_directory = Path(
+        tempfile.mkdtemp(prefix="zero-touch-upload-")
+    )
+    zip_path = upload_directory / "source.zip"
+
+    try:
+        uploaded_file.save(zip_path)
+
+        if not zipfile.is_zipfile(zip_path):
+            raise ValueError("The uploaded file is not a valid ZIP file.")
+
+        return str(zip_path), Path(filename).name
+
+    except Exception:
+        shutil.rmtree(upload_directory, ignore_errors=True)
+        raise
 
 
 def initialize_database() -> None:
@@ -1602,6 +1655,10 @@ def dashboard():
         )
 
         if action in ACTIONS:
+            remove_temporary_source(
+                session.get("application")
+            )
+
             session["action"] = action
 
             session.pop("cluster", None)
@@ -1946,7 +2003,6 @@ def application_step():
     if request.method == "POST":
         keys = [
             "app_name",
-            "image",
             "replicas",
             "port",
             "cpu_request",
@@ -1989,29 +2045,14 @@ def application_step():
                 )
             )
 
-        if action in {"deploy", "update"}:
-            image = normalize_docker_image(
-                values["image"]
+            data["image"] = (
+                session["application"].get(
+                    "image",
+                    "",
+                )
             )
 
-            if not image or not valid_docker_image_reference(image):
-                errors["image"] = (
-                    "Paste a Docker pull command "
-                    "such as 'docker pull httpd:2.4' "
-                    "or enter an image reference "
-                    "such as 'httpd:2.4'."
-                )
-
-            else:
-                available, availability_error = (
-                    public_image_is_available(image)
-                )
-
-                if not available:
-                    errors["image"] = availability_error
-
-                data["image"] = image
-
+        if action in {"deploy", "update"}:
             integer_fields = [
                 (
                     "replicas",
@@ -2043,6 +2084,49 @@ def application_step():
 
                 except ValueError as error:
                     errors[key] = str(error)
+
+            uploaded_source = request.files.get(
+                "source_zip"
+            )
+
+            source_was_selected = bool(
+                uploaded_source
+                and uploaded_source.filename
+            )
+
+            if action == "deploy" and not source_was_selected:
+                errors["source_zip"] = (
+                    "Select your application source-code ZIP."
+                )
+
+            if not errors and source_was_selected:
+                try:
+                    remove_temporary_source(
+                        session.get("application")
+                    )
+
+                    (
+                        data["source_zip_path"],
+                        data["source_filename"],
+                    ) = save_temporary_source(
+                        uploaded_source
+                    )
+
+                except (OSError, ValueError) as error:
+                    errors["source_zip"] = str(error)
+
+            elif action == "update":
+                current_application = session.get(
+                    "application",
+                    {},
+                )
+
+                for key in (
+                    "source_zip_path",
+                    "source_filename",
+                ):
+                    if current_application.get(key):
+                        data[key] = current_application[key]
 
             resource_fields = [
                 (
@@ -2092,7 +2176,12 @@ def clean_expired_operation_jobs() -> None:
         ]
 
         for job_id in expired_ids:
-            OPERATION_JOBS.pop(job_id, None)
+            expired_job = OPERATION_JOBS.pop(job_id, None)
+
+            if expired_job:
+                remove_temporary_source(
+                    expired_job.get("application")
+                )
 
 
 def operation_job_for_current_user(job_id: str):
@@ -2229,10 +2318,18 @@ def finish_operation_job(
                 "technical_message": str(error),
             }
 
+        remove_temporary_source(application)
+
         with OPERATION_JOBS_LOCK:
             job = OPERATION_JOBS.get(job_id)
 
             if job:
+                if job.get("application"):
+                    job["application"].pop(
+                        "source_zip_path",
+                        None,
+                    )
+
                 job["status"] = "completed"
                 job["result"] = result
                 job["completed_at"] = time.time()
@@ -2455,6 +2552,10 @@ def delete_failed_application():
 
 @app.route("/logout")
 def logout():
+    remove_temporary_source(
+        session.get("application")
+    )
+
     session.clear()
 
     return redirect(

@@ -16,6 +16,10 @@ from cluster_manager import (
     delete_cluster_profile,
     get_cluster_nodes,
 )
+from source_code_manager import (
+    build_and_push_source,
+    create_registry_secret,
+)
 
 
 def list_cluster_choices(allowed_names: set[str] | None = None) -> list[dict]:
@@ -687,6 +691,12 @@ def deploy_application_from_web(
         values.setdefault("namespace", "default")
         values["service_type"] = "ClusterIP"
 
+        if values.get("private_registry"):
+            create_registry_secret(
+                cluster_name=cluster_name,
+                namespace=values["namespace"],
+            )
+
         generated_files = generate_yaml_files(values)
 
         if generated_files is None:
@@ -876,6 +886,26 @@ def execute_web_action(
 
         if action in {"deploy", "update"}:
             values = dict(app_data)
+
+            source_zip_path = values.get(
+                "source_zip_path"
+            )
+
+            if source_zip_path:
+                source_result = build_and_push_source(
+                    zip_path=source_zip_path,
+                    application_name=app_name,
+                    application_port=int(values["port"]),
+                )
+
+                values["image"] = source_result["image"]
+                values["private_registry"] = True
+                app_data["image"] = source_result["image"]
+
+            elif action == "deploy":
+                raise ValueError(
+                    "The source-code ZIP is missing."
+                )
 
             values["cpu_request"] = (
                 f'{values["cpu_request"]}m'

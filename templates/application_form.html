@@ -9,14 +9,16 @@
         Current values are loaded from Kubernetes.
         Change only what you need.
     {% else %}
-        Enter the application configuration for the selected cluster.
+        Upload your Python application and configure its deployment.
     {% endif %}
 {% endblock %}
 
 {% block content %}
-<form method="post">
+
+<form method="post" enctype="multipart/form-data">
     <section class="form-section">
         <div class="form-grid">
+
             <div class="form-group">
                 <label for="app_name">
                     Application name
@@ -44,26 +46,33 @@
             </div>
 
             <div class="form-group">
-                <label for="image">
-                    Docker image
+                <label for="source_zip">
+                    Application source code
                 </label>
 
                 <input
-                    id="image"
-                    name="image"
-                    value="{{ values.get('image', '') }}"
-                    placeholder="Paste: docker pull httpd:2.4"
-                    required
+                    type="file"
+                    id="source_zip"
+                    name="source_zip"
+                    accept=".zip,application/zip"
+                    {% if action == 'deploy' %}required{% endif %}
                 >
 
                 <small>
-                    Copy the pull command from Docker Hub and paste it here.
-                    The system extracts the image automatically.
+                    Upload a ZIP containing your Python application
+                    and requirements.txt.
+                    Maximum size: 10 MB.
                 </small>
 
-                {% if errors.get('image') %}
+                {% if action == 'update' %}
+                    <small>
+                        Leave this empty to keep the currently deployed code.
+                    </small>
+                {% endif %}
+
+                {% if errors.get('source_zip') %}
                     <small class="field-error">
-                        {{ errors.image }}
+                        {{ errors.source_zip }}
                     </small>
                 {% endif %}
             </div>
@@ -93,17 +102,17 @@
 
                     {% if key == 'port' %}
                         <small>
-                            Type the exact port used by your service.
+                            Enter the port used by your Python application.
                             Valid range: 1–65535.
                         </small>
                     {% elif key == 'cpu_request' %}
                         <small>
-                            Type a whole number from 1 to
+                            Enter a whole number from 1 to
                             {{ max_cpu }} millicores.
                         </small>
                     {% elif key == 'memory_request' %}
                         <small>
-                            Type a whole number from 1 to
+                            Enter a whole number from 1 to
                             {{ max_memory }} MiB.
                         </small>
                     {% endif %}
@@ -115,10 +124,11 @@
                     {% endif %}
                 </div>
             {% endfor %}
+
         </div>
     </section>
 
-    <button class="deploy-button">
+    <button class="deploy-button" type="submit">
         Review operation
     </button>
 </form>
@@ -129,4 +139,5 @@
 >
     Back
 </a>
+
 {% endblock %}
