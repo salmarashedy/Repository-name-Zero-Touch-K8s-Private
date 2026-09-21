@@ -2,26 +2,26 @@ apiVersion: apps/v1
 kind: Deployment
 
 metadata:
-  name: {{ app_name }}-deployment
-  namespace: {{ namespace }}
+  name: expense-tracker-deployment
+  namespace: default
   labels:
-    app: {{ app_name }}
+    app: expense-tracker
 
 spec:
-  replicas: {{ replicas }}
+  replicas: 2
 
   selector:
     matchLabels:
-      app: {{ app_name }}
+      app: expense-tracker
 
   template:
     metadata:
       labels:
-        app: {{ app_name }}
+        app: expense-tracker
 
     spec:
       imagePullSecrets:
-        - name: {{ registry_secret_name }}
+        - name: zero-touch-registry
 
       topologySpreadConstraints:
         - maxSkew: 1
@@ -29,21 +29,21 @@ spec:
           whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:
-              app: {{ app_name }}
+              app: expense-tracker
 
       containers:
-        - name: {{ app_name }}
-          image: {{ image }}
+        - name: expense-tracker
+          image: ghcr.io/salmarashedy/zero-touch/expense-tracker:5cdc2020a23b
           imagePullPolicy: IfNotPresent
 
           ports:
-            - containerPort: {{ port }}
+            - containerPort: 5000
 
           resources:
             requests:
-              cpu: {{ cpu_request }}
-              memory: {{ memory_request }}
+              cpu: 300m
+              memory: 247Mi
 
             limits:
-              cpu: {{ cpu_limit }}
-              memory: {{ memory_limit }}
+              cpu: 1000m
+              memory: 1024Mi

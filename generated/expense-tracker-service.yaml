@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: expense-tracker-service
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app: expense-tracker
+
+  ports:
+    - port: 5000
+      targetPort: 5000

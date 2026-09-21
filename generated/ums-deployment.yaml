@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: ums-deployment
+  namespace: default
+
+  labels:
+    app: ums
+
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: ums
+
+  template:
+    metadata:
+      labels:
+        app: ums
+
+    spec:
+      imagePullSecrets:
+        - name: private-registry-credentials
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+
+          labelSelector:
+            matchLabels:
+              app: ums
+
+      containers:
+        - name: ums
+          image: ghcr.io/salmarashedy/ums:e66035dd8668
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 5000
+
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+
+            limits:
+              cpu: 1000m
+              memory: 1024Mi

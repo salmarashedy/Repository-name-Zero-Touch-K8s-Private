@@ -2,26 +2,26 @@ apiVersion: apps/v1
 kind: Deployment
 
 metadata:
-  name: {{ app_name }}-deployment
-  namespace: {{ namespace }}
+  name: weather-app-deployment
+  namespace: default
   labels:
-    app: {{ app_name }}
+    app: weather-app
 
 spec:
-  replicas: {{ replicas }}
+  replicas: 2
 
   selector:
     matchLabels:
-      app: {{ app_name }}
+      app: weather-app
 
   template:
     metadata:
       labels:
-        app: {{ app_name }}
+        app: weather-app
 
     spec:
       imagePullSecrets:
-        - name: {{ registry_secret_name }}
+        - name: zero-touch-registry
 
       topologySpreadConstraints:
         - maxSkew: 1
@@ -29,21 +29,21 @@ spec:
           whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:
-              app: {{ app_name }}
+              app: weather-app
 
       containers:
-        - name: {{ app_name }}
-          image: {{ image }}
+        - name: weather-app
+          image: ghcr.io/salmarashedy/zero-touch/weather-app:9eac449b3ace
           imagePullPolicy: IfNotPresent
 
           ports:
-            - containerPort: {{ port }}
+            - containerPort: 5000
 
           resources:
             requests:
-              cpu: {{ cpu_request }}
-              memory: {{ memory_request }}
+              cpu: 500m
+              memory: 256Mi
 
             limits:
-              cpu: {{ cpu_limit }}
-              memory: {{ memory_limit }}
+              cpu: 1000m
+              memory: 1024Mi

@@ -9,16 +9,14 @@
         Current values are loaded from Kubernetes.
         Change only what you need.
     {% else %}
-        Upload your Python application and configure its deployment.
+        Enter the application configuration for the selected cluster.
     {% endif %}
 {% endblock %}
 
 {% block content %}
-
 <form method="post" enctype="multipart/form-data">
     <section class="form-section">
         <div class="form-grid">
-
             <div class="form-group">
                 <label for="app_name">
                     Application name
@@ -46,34 +44,16 @@
             </div>
 
             <div class="form-group">
-                <label for="source_zip">
-                    Application source code
-                </label>
-
-                <input
-                    type="file"
-                    id="source_zip"
-                    name="source_zip"
-                    accept=".zip,application/zip"
-                    {% if action == 'deploy' %}required{% endif %}
-                >
-
+                <label for="source_archive">Private source-code ZIP</label>
+                <input id="source_archive" name="source_archive" type="file" accept=".zip,application/zip"
+                    {% if action == 'deploy' %}required{% endif %}>
                 <small>
-                    Upload a ZIP containing your Python application
-                    and requirements.txt.
-                    Maximum size: 10 MB.
+                    The ZIP must contain a Dockerfile at the project root. The application must listen on
+                    0.0.0.0 and use the container port entered below.
+                    {% if action == 'update' %}Leave empty to keep the current image.{% endif %}
                 </small>
-
-                {% if action == 'update' %}
-                    <small>
-                        Leave this empty to keep the currently deployed code.
-                    </small>
-                {% endif %}
-
-                {% if errors.get('source_zip') %}
-                    <small class="field-error">
-                        {{ errors.source_zip }}
-                    </small>
+                {% if errors.get('source_archive') %}
+                    <small class="field-error">{{ errors.source_archive }}</small>
                 {% endif %}
             </div>
 
@@ -102,17 +82,17 @@
 
                     {% if key == 'port' %}
                         <small>
-                            Enter the port used by your Python application.
+                            Type the exact port used by your service.
                             Valid range: 1–65535.
                         </small>
                     {% elif key == 'cpu_request' %}
                         <small>
-                            Enter a whole number from 1 to
+                            Type a whole number from 1 to
                             {{ max_cpu }} millicores.
                         </small>
                     {% elif key == 'memory_request' %}
                         <small>
-                            Enter a whole number from 1 to
+                            Type a whole number from 1 to
                             {{ max_memory }} MiB.
                         </small>
                     {% endif %}
@@ -124,11 +104,10 @@
                     {% endif %}
                 </div>
             {% endfor %}
-
         </div>
     </section>
 
-    <button class="deploy-button" type="submit">
+    <button class="deploy-button">
         Review operation
     </button>
 </form>
@@ -139,5 +118,4 @@
 >
     Back
 </a>
-
 {% endblock %}

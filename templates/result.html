@@ -120,6 +120,12 @@
         </p>
     {% endif %}
 
+    {% if result.success and result.get("application_url") %}
+        <a class="deploy-button" href="{{ result.application_url }}" target="_blank" rel="noopener">
+            Open application
+        </a>
+    {% endif %}
+
 
     {% if result.get("failed_delete_token") %}
         <section class="form-section warning-box">

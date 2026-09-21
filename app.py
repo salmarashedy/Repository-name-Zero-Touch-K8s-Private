@@ -3,15 +3,12 @@ import copy
 import os
 import random
 import re
-import shutil
 import smtplib
 import sqlite3
 import subprocess
-import tempfile
 import threading
 import time
 import uuid
-import zipfile
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -26,11 +23,11 @@ from deployment_manager import (
     list_pod_choices,
 )
 from cluster_manager import cluster_exists, delete_cluster_profile
+from application_gateway import create_application_token, proxy_application
+from source_code_manager import save_source_upload
 
 
 app = Flask(__name__)
-
-app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 secret = os.environ.get("FLASK_SECRET_KEY")
 
@@ -38,6 +35,8 @@ if not secret:
     secret = random.SystemRandom().randbytes(32).hex()
 
 app.secret_key = secret
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_BYTES", 50 * 1024 * 1024))
+UPLOAD_DIRECTORY = Path(__file__).resolve().parent / "uploads"
 
 
 DATABASE_PATH = (
@@ -68,54 +67,6 @@ OPERATION_JOBS = {}
 OPERATION_JOBS_LOCK = threading.Lock()
 OPERATION_EXECUTION_LOCK = threading.Lock()
 OPERATION_JOB_TTL_SECONDS = 3600
-
-
-def remove_temporary_source(application: dict | None) -> None:
-    if not application:
-        return
-
-    source_zip_path = application.get("source_zip_path")
-
-    if not source_zip_path:
-        return
-
-    upload_directory = Path(source_zip_path).resolve().parent
-    temporary_root = Path(tempfile.gettempdir()).resolve()
-
-    try:
-        upload_directory.relative_to(temporary_root)
-    except ValueError:
-        return
-
-    if upload_directory.name.startswith("zero-touch-upload-"):
-        shutil.rmtree(upload_directory, ignore_errors=True)
-
-
-def save_temporary_source(uploaded_file) -> tuple[str, str]:
-    filename = str(uploaded_file.filename or "").strip()
-
-    if not filename:
-        raise ValueError("Select a source-code ZIP file.")
-
-    if not filename.lower().endswith(".zip"):
-        raise ValueError("The source code must be uploaded as a ZIP file.")
-
-    upload_directory = Path(
-        tempfile.mkdtemp(prefix="zero-touch-upload-")
-    )
-    zip_path = upload_directory / "source.zip"
-
-    try:
-        uploaded_file.save(zip_path)
-
-        if not zipfile.is_zipfile(zip_path):
-            raise ValueError("The uploaded file is not a valid ZIP file.")
-
-        return str(zip_path), Path(filename).name
-
-    except Exception:
-        shutil.rmtree(upload_directory, ignore_errors=True)
-        raise
 
 
 def initialize_database() -> None:
@@ -341,12 +292,12 @@ def public_image_is_available(image: str) -> tuple[bool, str | None]:
             check=False,
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=60,
         )
     except FileNotFoundError:
         return False, "Docker was not found. Start Docker Desktop and try again."
     except subprocess.TimeoutExpired:
-        return False, "The image registry did not respond within 30 seconds."
+        return False, "The image registry did not respond within 60 seconds."
 
     if result.returncode == 0:
         return True, None
@@ -845,6 +796,9 @@ def send_operation_email(
             f"{result['application_duration']:.2f} "
             "seconds"
         )
+
+    if result.get("application_url"):
+        details.extend(["", f"Open application: {result['application_url']}"])
 
     details.extend(
         [
@@ -1655,10 +1609,6 @@ def dashboard():
         )
 
         if action in ACTIONS:
-            remove_temporary_source(
-                session.get("application")
-            )
-
             session["action"] = action
 
             session.pop("cluster", None)
@@ -2045,14 +1995,19 @@ def application_step():
                 )
             )
 
-            data["image"] = (
-                session["application"].get(
-                    "image",
-                    "",
-                )
-            )
-
         if action in {"deploy", "update"}:
+            source_archive = request.files.get("source_archive")
+            if source_archive and source_archive.filename:
+                try:
+                    staged_path = save_source_upload(source_archive, UPLOAD_DIRECTORY)
+                    data["source_archive"] = str(staged_path)
+                except (OSError, ValueError) as error:
+                    errors["source_archive"] = str(error)
+            elif action == "deploy":
+                errors["source_archive"] = "Upload your Docker-ready application as a ZIP file."
+            else:
+                data["image"] = session["application"].get("image", "")
+
             integer_fields = [
                 (
                     "replicas",
@@ -2084,49 +2039,6 @@ def application_step():
 
                 except ValueError as error:
                     errors[key] = str(error)
-
-            uploaded_source = request.files.get(
-                "source_zip"
-            )
-
-            source_was_selected = bool(
-                uploaded_source
-                and uploaded_source.filename
-            )
-
-            if action == "deploy" and not source_was_selected:
-                errors["source_zip"] = (
-                    "Select your application source-code ZIP."
-                )
-
-            if not errors and source_was_selected:
-                try:
-                    remove_temporary_source(
-                        session.get("application")
-                    )
-
-                    (
-                        data["source_zip_path"],
-                        data["source_filename"],
-                    ) = save_temporary_source(
-                        uploaded_source
-                    )
-
-                except (OSError, ValueError) as error:
-                    errors["source_zip"] = str(error)
-
-            elif action == "update":
-                current_application = session.get(
-                    "application",
-                    {},
-                )
-
-                for key in (
-                    "source_zip_path",
-                    "source_filename",
-                ):
-                    if current_application.get(key):
-                        data[key] = current_application[key]
 
             resource_fields = [
                 (
@@ -2165,6 +2077,12 @@ def application_step():
     )
 
 
+@app.route("/apps/<token>/", defaults={"subpath": ""}, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+@app.route("/apps/<token>/<path:subpath>", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+def application_gateway(token: str, subpath: str):
+    return proxy_application(app.secret_key, token, subpath)
+
+
 def clean_expired_operation_jobs() -> None:
     cutoff = time.time() - OPERATION_JOB_TTL_SECONDS
 
@@ -2176,12 +2094,7 @@ def clean_expired_operation_jobs() -> None:
         ]
 
         for job_id in expired_ids:
-            expired_job = OPERATION_JOBS.pop(job_id, None)
-
-            if expired_job:
-                remove_temporary_source(
-                    expired_job.get("application")
-                )
+            OPERATION_JOBS.pop(job_id, None)
 
 
 def operation_job_for_current_user(job_id: str):
@@ -2225,6 +2138,20 @@ def finish_operation_job(
                 cluster,
                 application,
             )
+
+            if result.get("success") and action in {"deploy", "update"} and application:
+                gateway_token = create_application_token(
+                    app.secret_key,
+                    cluster["cluster_name"],
+                    application.get("namespace", "default"),
+                    f"{application['app_name']}-service",
+                    application["port"],
+                )
+                base_url = os.environ.get(
+                 "PUBLIC_BASE_URL","http://127.0.0.1:5055",).rstrip("/")
+
+                result["application_url"] = ( f"{base_url}/apps/{gateway_token}/"
+                )
 
             result = prepare_user_friendly_result(
                 result,
@@ -2318,18 +2245,10 @@ def finish_operation_job(
                 "technical_message": str(error),
             }
 
-        remove_temporary_source(application)
-
         with OPERATION_JOBS_LOCK:
             job = OPERATION_JOBS.get(job_id)
 
             if job:
-                if job.get("application"):
-                    job["application"].pop(
-                        "source_zip_path",
-                        None,
-                    )
-
                 job["status"] = "completed"
                 job["result"] = result
                 job["completed_at"] = time.time()
@@ -2552,10 +2471,6 @@ def delete_failed_application():
 
 @app.route("/logout")
 def logout():
-    remove_temporary_source(
-        session.get("application")
-    )
-
     session.clear()
 
     return redirect(
@@ -2564,11 +2479,4 @@ def logout():
 
 
 if __name__ == "__main__":
-    initialize_database()
-
-    app.run(
-        debug=(
-            os.environ.get("FLASK_DEBUG")
-            == "1"
-        )
-    )
+    app.run(host="0.0.0.0", port=5055)

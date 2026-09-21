@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: app2-deployment
+  namespace: default
+
+  labels:
+    app: app2
+
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: app2
+
+  template:
+    metadata:
+      labels:
+        app: app2
+
+    spec:
+      imagePullSecrets:
+        - name: private-registry-credentials
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+
+          labelSelector:
+            matchLabels:
+              app: app2
+
+      containers:
+        - name: app2
+          image: ghcr.io/salmarashedy/app2:844374539204
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 5001
+
+          resources:
+            requests:
+              cpu: 500m
+              memory: 506Mi
+
+            limits:
+              cpu: 1000m
+              memory: 1024Mi

@@ -1,3 +1,7 @@
+"""Secure source archive validation and private container image publishing."""
+
+from __future__ import annotations
+
 import os
 import re
 import shutil
@@ -6,368 +10,97 @@ import subprocess
 import tempfile
 import uuid
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
-MAX_EXTRACTED_SIZE = 50 * 1024 * 1024
-MAX_FILE_COUNT = 500
-
-REGISTRY_SECRET_NAME = "private-registry-credentials"
-
-
-class SourceCodeError(RuntimeError):
-    pass
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 50 * 1024 * 1024))
+MAX_EXTRACTED_BYTES = int(os.environ.get("MAX_EXTRACTED_BYTES", 250 * 1024 * 1024))
+MAX_ARCHIVE_FILES = int(os.environ.get("MAX_ARCHIVE_FILES", 5000))
 
 
-def run_command(
-    command: list[str],
-    input_text: str | None = None,
-) -> str:
+def save_source_upload(upload, upload_directory: Path) -> Path:
+    """Save a Flask upload under an unpredictable server-side name."""
+    upload_directory.mkdir(parents=True, exist_ok=True)
+    destination = upload_directory / f"{uuid.uuid4().hex}.zip"
+    upload.save(destination)
+    if destination.stat().st_size > MAX_UPLOAD_BYTES:
+        destination.unlink(missing_ok=True)
+        raise ValueError(f"The ZIP exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MiB limit.")
+    validate_source_archive(destination)
+    return destination
+
+
+def validate_source_archive(archive_path: Path) -> None:
+    if not zipfile.is_zipfile(archive_path):
+        raise ValueError("Upload a valid ZIP archive.")
+    total_size = 0
+    with zipfile.ZipFile(archive_path) as archive:
+        members = archive.infolist()
+        if not members or len(members) > MAX_ARCHIVE_FILES:
+            raise ValueError("The ZIP is empty or contains too many files.")
+        for member in members:
+            path = PurePosixPath(member.filename.replace("\\", "/"))
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError("The ZIP contains an unsafe extraction path.")
+            mode = member.external_attr >> 16
+            if stat.S_ISLNK(mode):
+                raise ValueError("Symbolic links are not allowed in source ZIP files.")
+            total_size += member.file_size
+            if total_size > MAX_EXTRACTED_BYTES:
+                raise ValueError("The extracted project would exceed the safety limit.")
+
+
+def _extract_project(archive_path: Path, target: Path) -> Path:
+    validate_source_archive(archive_path)
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(target)
+    entries = [item for item in target.iterdir() if item.name not in {"__MACOSX"}]
+    root = entries[0] if len(entries) == 1 and entries[0].is_dir() else target
+    if not (root / "Dockerfile").is_file():
+        raise ValueError("Dockerfile must exist at the root of the uploaded project.")
+    return root
+
+
+def _run(command: list[str], *, input_text: str | None = None, timeout: int = 900) -> str:
     try:
         result = subprocess.run(
-            command,
-            input=input_text,
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=600,
+            command, input=input_text, text=True, capture_output=True,
+            timeout=timeout, check=False,
         )
-
     except FileNotFoundError as error:
-        raise SourceCodeError(
-            f"Required command was not found: {command[0]}"
-        ) from error
-
+        raise RuntimeError(f"Required command '{command[0]}' was not found.") from error
     except subprocess.TimeoutExpired as error:
-        raise SourceCodeError(
-            f"The command took too long: {command[0]}"
-        ) from error
-
-    if result.returncode != 0:
-        message = (
-            result.stderr.strip()
-            or result.stdout.strip()
-            or f"Command failed: {command[0]}"
-        )
-
-        raise SourceCodeError(message)
-
+        raise RuntimeError(f"Command timed out: {' '.join(command[:2])}") from error
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail[-4000:] or f"Command failed: {' '.join(command)}")
     return result.stdout.strip()
 
 
-def safe_extract_zip(
-    zip_path: Path,
-    destination: Path,
-) -> None:
-    try:
-        archive = zipfile.ZipFile(zip_path)
-
-    except zipfile.BadZipFile as error:
-        raise SourceCodeError(
-            "The uploaded file is not a valid ZIP file."
-        ) from error
-
-    with archive:
-        files = archive.infolist()
-
-        if len(files) > MAX_FILE_COUNT:
-            raise SourceCodeError(
-                "The ZIP contains too many files."
-            )
-
-        extracted_size = sum(
-            item.file_size
-            for item in files
+def build_and_push_private_image(archive_path: str, app_name: str) -> dict:
+    """Build the uploaded project and push it to the configured private registry."""
+    registry = os.environ.get("REGISTRY_SERVER", "").strip().rstrip("/")
+    username = os.environ.get("REGISTRY_USERNAME", "").strip()
+    password = os.environ.get("REGISTRY_PASSWORD", "")
+    repository = os.environ.get("REGISTRY_REPOSITORY", "zero-touch").strip("/")
+    if not registry or not username or not password:
+        raise RuntimeError(
+            "Private registry settings are incomplete. Configure REGISTRY_SERVER, "
+            "REGISTRY_USERNAME, and REGISTRY_PASSWORD."
         )
-
-        if extracted_size > MAX_EXTRACTED_SIZE:
-            raise SourceCodeError(
-                "The extracted source code is larger than 50 MB."
-            )
-
-        destination = destination.resolve()
-
-        for item in files:
-            item_path = (
-                destination / item.filename
-            ).resolve()
-
-            try:
-                item_path.relative_to(destination)
-
-            except ValueError as error:
-                raise SourceCodeError(
-                    "The ZIP contains an unsafe file path."
-                ) from error
-
-            file_mode = item.external_attr >> 16
-
-            if stat.S_ISLNK(file_mode):
-                raise SourceCodeError(
-                    "Symbolic links are not allowed in the ZIP."
-                )
-
-        archive.extractall(destination)
+    safe_app = re.sub(r"[^a-z0-9._-]+", "-", app_name.lower()).strip("-.")
+    tag = uuid.uuid4().hex[:12]
+    image = f"{registry}/{repository}/{safe_app}:{tag}"
+    with tempfile.TemporaryDirectory(prefix="zero-touch-build-") as temporary:
+        project_root = _extract_project(Path(archive_path), Path(temporary))
+        _run(["docker", "login", registry, "--username", username, "--password-stdin"], input_text=password, timeout=120)
+        _run(["docker", "build", "--pull", "--tag", image, str(project_root)])
+        _run(["docker", "push", image])
+    return {"image": image, "registry_server": registry, "registry_username": username}
 
 
-def locate_application_directory(
-    extracted_directory: Path,
-) -> Path:
-    matches = []
-
-    for app_file in extracted_directory.rglob("app.py"):
-        directory = app_file.parent
-
-        if (directory / "requirements.txt").is_file():
-            matches.append(directory)
-
-    if not matches:
-        raise SourceCodeError(
-            "The ZIP must contain app.py and requirements.txt "
-            "inside the same folder."
-        )
-
-    if len(matches) > 1:
-        raise SourceCodeError(
-            "The ZIP contains more than one application. "
-            "Upload only one application."
-        )
-
-    return matches[0]
-
-
-def create_dockerfile(
-    application_directory: Path,
-    application_port: int,
-) -> Path:
-    dockerfile_path = (
-        application_directory
-        / "Dockerfile.zero-touch"
-    )
-
-    dockerfile_content = f"""FROM python:3.13-slim
-
-WORKDIR /app
-
-COPY requirements.txt .
-
-RUN pip install --no-cache-dir -r requirements.txt \\
-    && pip install --no-cache-dir gunicorn
-
-COPY . .
-
-EXPOSE {application_port}
-
-CMD ["gunicorn", "--bind", "0.0.0.0:{application_port}", "app:app"]
-"""
-
-    dockerfile_path.write_text(
-        dockerfile_content,
-        encoding="utf-8",
-    )
-
-    return dockerfile_path
-
-
-def registry_settings() -> dict:
-    settings = {
-        "server": os.environ.get(
-            "REGISTRY_SERVER",
-            "ghcr.io",
-        ).strip(),
-        "username": os.environ.get(
-            "REGISTRY_USERNAME",
-            "",
-        ).strip(),
-        "owner": os.environ.get(
-            "REGISTRY_OWNER",
-            "",
-        ).strip().lower(),
-        "email": os.environ.get(
-            "REGISTRY_EMAIL",
-            "",
-        ).strip(),
-        "token": os.environ.get(
-            "REGISTRY_TOKEN",
-            "",
-        ).strip(),
-    }
-
-    missing = [
-        name
-        for name, value in settings.items()
-        if not value
-    ]
-
-    if missing:
-        raise SourceCodeError(
-            "Private registry configuration is missing: "
-            + ", ".join(missing)
-        )
-
-    return settings
-
-
-def normalize_image_part(value: str) -> str:
-    normalized = re.sub(
-        r"[^a-z0-9._-]+",
-        "-",
-        value.strip().lower(),
-    )
-
-    normalized = normalized.strip(".-_")
-
-    if not normalized:
-        raise SourceCodeError(
-            "The application name cannot be used as an image name."
-        )
-
-    return normalized
-
-
-def build_and_push_source(
-    zip_path: str,
-    application_name: str,
-    application_port: int,
-) -> dict:
-    source_zip = Path(zip_path)
-
-    if not source_zip.is_file():
-        raise SourceCodeError(
-            "The uploaded source-code ZIP could not be found."
-        )
-
-    settings = registry_settings()
-
-    temporary_directory = Path(
-        tempfile.mkdtemp(
-            prefix="zero-touch-build-"
-        )
-    )
-
-    extracted_directory = (
-        temporary_directory / "source"
-    )
-
-    extracted_directory.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    try:
-        safe_extract_zip(
-            source_zip,
-            extracted_directory,
-        )
-
-        application_directory = (
-            locate_application_directory(
-                extracted_directory
-            )
-        )
-
-        dockerfile = create_dockerfile(
-            application_directory,
-            application_port,
-        )
-
-        image_application_name = normalize_image_part(
-            application_name
-        )
-
-        image_tag = uuid.uuid4().hex[:12]
-
-        image_name = (
-            f'{settings["server"]}/'
-            f'{settings["owner"]}/'
-            f"{image_application_name}:{image_tag}"
-        )
-
-        run_command(
-            [
-                "docker",
-                "login",
-                settings["server"],
-                "--username",
-                settings["username"],
-                "--password-stdin",
-            ],
-            input_text=settings["token"],
-        )
-
-        run_command(
-            [
-                "docker",
-                "build",
-                "--file",
-                str(dockerfile),
-                "--tag",
-                image_name,
-                str(application_directory),
-            ]
-        )
-
-        run_command(
-            [
-                "docker",
-                "push",
-                image_name,
-            ]
-        )
-
-        return {
-            "image": image_name,
-            "registry_server": settings["server"],
-            "registry_username": settings["username"],
-            "registry_email": settings["email"],
-            "registry_token": settings["token"],
-            "registry_secret": REGISTRY_SECRET_NAME,
-        }
-
-    finally:
-        shutil.rmtree(
-            temporary_directory,
-            ignore_errors=True,
-        )
-
-
-def create_registry_secret(
-    cluster_name: str,
-    namespace: str = "default",
-) -> str:
-    settings = registry_settings()
-
-    secret_yaml = run_command(
-        [
-            "kubectl",
-            "--context",
-            cluster_name,
-            "--namespace",
-            namespace,
-            "create",
-            "secret",
-            "docker-registry",
-            REGISTRY_SECRET_NAME,
-            f'--docker-server={settings["server"]}',
-            f'--docker-username={settings["username"]}',
-            f'--docker-password={settings["token"]}',
-            f'--docker-email={settings["email"]}',
-            "--dry-run=client",
-            "--output=yaml",
-        ]
-    )
-
-    run_command(
-        [
-            "kubectl",
-            "--context",
-            cluster_name,
-            "--namespace",
-            namespace,
-            "apply",
-            "--filename=-",
-        ],
-        input_text=secret_yaml,
-    )
-
-    return REGISTRY_SECRET_NAME
+def remove_staged_upload(path: str | None) -> None:
+    if path:
+        candidate = Path(path)
+        if candidate.name.endswith(".zip") and candidate.parent.name == "uploads":
+            candidate.unlink(missing_ok=True)

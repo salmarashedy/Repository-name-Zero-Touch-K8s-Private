@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: python-demoapp-deployment
+  namespace: default
+
+  labels:
+    app: python-demoapp
+
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: python-demoapp
+
+  template:
+    metadata:
+      labels:
+        app: python-demoapp
+
+    spec:
+      imagePullSecrets:
+        - name: private-registry-credentials
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+
+          labelSelector:
+            matchLabels:
+              app: python-demoapp
+
+      containers:
+        - name: python-demoapp
+          image: ghcr.io/salmarashedy/python-demoapp:76ebcf39360e
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 5000
+
+          resources:
+            requests:
+              cpu: 500m
+              memory: 265Mi
+
+            limits:
+              cpu: 1000m
+              memory: 1024Mi

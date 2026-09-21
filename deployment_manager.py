@@ -1,4 +1,6 @@
+import base64
 import json
+import os
 import re
 import subprocess
 import time
@@ -16,10 +18,7 @@ from cluster_manager import (
     delete_cluster_profile,
     get_cluster_nodes,
 )
-from source_code_manager import (
-    build_and_push_source,
-    create_registry_secret,
-)
+from source_code_manager import build_and_push_private_image, remove_staged_upload
 
 
 def list_cluster_choices(allowed_names: set[str] | None = None) -> list[dict]:
@@ -378,6 +377,48 @@ def wait_for_deployment(
         return False
 
 
+def collect_deployment_diagnostics(cluster_name: str, namespace: str, app_name: str) -> str:
+    """Return bounded Pod status, events, and logs for a failed rollout."""
+    commands = [
+        ["kubectl", "--context", cluster_name, "-n", namespace, "get", "pods", "-l", f"app={app_name}", "-o", "wide"],
+        ["kubectl", "--context", cluster_name, "-n", namespace, "get", "events", "--sort-by=.lastTimestamp"],
+        ["kubectl", "--context", cluster_name, "-n", namespace, "logs", f"deployment/{app_name}-deployment", "--all-containers=true", "--tail=100"],
+    ]
+    sections = []
+    for command in commands:
+        result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=30)
+        output = (result.stdout or result.stderr).strip()
+        if output:
+            sections.append(output[-6000:])
+    return "\n\n".join(sections) or "No Kubernetes diagnostics were available."
+
+
+def ensure_registry_pull_secret(cluster_name: str, namespace: str) -> str:
+    secret_name = "zero-touch-registry"
+    server = os.environ.get("REGISTRY_SERVER", "").strip().rstrip("/")
+    username = os.environ.get("REGISTRY_USERNAME", "").strip()
+    password = os.environ.get("REGISTRY_PASSWORD", "")
+    email = os.environ.get("REGISTRY_EMAIL", username)
+    if not server or not username or not password:
+        raise RuntimeError("Private registry credentials are not configured.")
+    authorization = base64.b64encode(f"{username}:{password}".encode()).decode()
+    docker_config = json.dumps({"auths": {server: {
+        "username": username, "password": password, "email": email, "auth": authorization
+    }}}, separators=(",", ":"))
+    manifest = json.dumps({
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": {"name": secret_name, "namespace": namespace},
+        "type": "kubernetes.io/dockerconfigjson",
+        "data": {".dockerconfigjson": base64.b64encode(docker_config.encode()).decode()},
+    })
+    applied = subprocess.run(
+        ["kubectl", "--context", cluster_name, "-n", namespace, "apply", "-f", "-"],
+        input=manifest, text=True, capture_output=True, check=False,
+    )
+    if applied.returncode:
+        raise RuntimeError(applied.stderr.strip() or "Registry pull secret could not be created.")
+    return secret_name
+
 # Display the Kubernetes resources created for an application
 def show_application_status(
     app_name: str,
@@ -690,12 +731,9 @@ def deploy_application_from_web(
 
         values.setdefault("namespace", "default")
         values["service_type"] = "ClusterIP"
-
-        if values.get("private_registry"):
-            create_registry_secret(
-                cluster_name=cluster_name,
-                namespace=values["namespace"],
-            )
+        values["registry_secret_name"] = ensure_registry_pull_secret(
+            cluster_name, values["namespace"]
+        )
 
         generated_files = generate_yaml_files(values)
 
@@ -747,10 +785,13 @@ def deploy_application_from_web(
         )
 
         if not deployment_ready:
+            diagnostics = collect_deployment_diagnostics(
+                cluster_name, values["namespace"], values["app_name"]
+            )
             raise RuntimeError(
                 "The resources were applied, but the "
                 "Deployment did not become ready "
-                "within 120 seconds."
+                "within 120 seconds.\n\n" + diagnostics
             )
 
         show_application_status(
@@ -887,25 +928,19 @@ def execute_web_action(
         if action in {"deploy", "update"}:
             values = dict(app_data)
 
-            source_zip_path = values.get(
-                "source_zip_path"
-            )
-
-            if source_zip_path:
-                source_result = build_and_push_source(
-                    zip_path=source_zip_path,
-                    application_name=app_name,
-                    application_port=int(values["port"]),
-                )
-
-                values["image"] = source_result["image"]
-                values["private_registry"] = True
-                app_data["image"] = source_result["image"]
-
-            elif action == "deploy":
-                raise ValueError(
-                    "The source-code ZIP is missing."
-                )
+            source_archive = values.get("source_archive")
+            if source_archive:
+                try:
+                    image_result = build_and_push_private_image(
+                        source_archive, values["app_name"]
+                    )
+                    values["image"] = image_result["image"]
+                    app_data["image"] = image_result["image"]
+                finally:
+                    remove_staged_upload(source_archive)
+                    app_data.pop("source_archive", None)
+            elif not values.get("image"):
+                raise ValueError("A source-code ZIP is required for this deployment.")
 
             values["cpu_request"] = (
                 f'{values["cpu_request"]}m'
